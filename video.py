@@ -7,20 +7,28 @@ from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, con
 from deep_translator import GoogleTranslator
 import math
 import time
+import shutil
+from datetime import datetime
 
                        
-                                                          
-                                                          
 URL_SUBREDDIT = "https://www.reddit.com/r/AskReddit/top/?t=week"
+VOZ_IA = "es-MX-JorgeNeural"
+VELOCIDAD_VOZ = "-15%"  
+DURACION_OBJETIVO_MINUTOS = 30  
+CANTIDAD_IMAGENES = 10 
+TIEMPO_POR_IMAGEN = 10 
 
-VOZ_IA = "es-MX-JorgeNeural" 
-VELOCIDAD_VOZ = "-20%"                             
-ARCHIVO_HISTORIAL = "historial_global.txt"
-DURACION_OBJETIVO_MINUTOS = 5                                                          
-CANTIDAD_IMAGENES = 5
-TIEMPO_POR_IMAGEN = 15                                                                     
+                             
+def crear_carpeta_proyecto():
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nombre_carpeta = f"Video_{timestamp}"
+    if not os.path.exists(nombre_carpeta):
+        os.makedirs(nombre_carpeta)
+    print(f"📁 Carpeta del proyecto creada: {nombre_carpeta}")
+    return nombre_carpeta
 
                               
+ARCHIVO_HISTORIAL = "historial_global.txt"
 def cargar_historial():
     if not os.path.exists(ARCHIVO_HISTORIAL):
         open(ARCHIVO_HISTORIAL, 'w').close()
@@ -35,236 +43,224 @@ def guardar_lista_historial(ids_nuevos):
 
                    
 def traducir_a_espanol(texto):
-    \
     try:
-                                                                                 
-        if len(texto) > 4500:
-            texto = texto[:4500] 
-        
-        traductor = GoogleTranslator(source='auto', target='es')
-        traducido = traductor.translate(texto)
-        return traducido
-    except Exception as e:
-        print(f"⚠️ Error traduciendo: {e}. Usando texto original.")
+        if len(texto) > 4500: texto = texto[:4500]
+        return GoogleTranslator(source='auto', target='es').translate(texto)
+    except:
         return texto
 
-                                    
-def obtener_pack_historias(historial_usados):
-    \
-\
-\
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+                                   
+def obtener_contenido_reddit(carpeta_destino, historial_usados):
+                                                                
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://www.google.com/'
+    }
     
-                                                        
-                                          
-    url_base = URL_SUBREDDIT.split('?')[0]                                  
-    if url_base.endswith("/"): url_base = url_base[:-1]
-    
-                                            
-    url_api_subreddit = f"{url_base}/.json?t=week&limit=5"
-
-    print(f"🕵️ Buscando el mejor post de la semana en AskReddit...")
-
+    print("🕵️ Buscando post viral...")
     try:
-                                                    
-        resp_sub = requests.get(url_api_subreddit, headers=headers)
-        if resp_sub.status_code != 200:
-            print(f"❌ Error conectando al Subreddit: {resp_sub.status_code}")
-            return [], []
+                              
+        url_base = URL_SUBREDDIT.split('?')[0]
+        if url_base.endswith("/"): url_base = url_base[:-1]
+        
+                                                              
+        resp = requests.get(f"{url_base}/.json?t=week&limit=10&raw_json=1", headers=headers)
+        
+        if resp.status_code == 429:
+            print("❌ ERROR 429: Reddit nos bloqueó por hacer muchas peticiones. Espera unos minutos.")
+            return None, None, None
+        
+        if resp.status_code != 200:
+            print(f"❌ Error conectando a Reddit: Código {resp.status_code}")
+            return None, None, None
             
-        posts_data = resp_sub.json()['data']['children']
-        
-        url_post_elegido = None
-        titulo_post = ""
-        
-                                                                           
-        for p in posts_data:
-            data = p['data']
-            if not data['stickied'] and data['num_comments'] > 10:
-                url_post_elegido = f"https://www.reddit.com{data['permalink']}"
-                titulo_post = data['title']
+        posts = resp.json()['data']['children']
+        post_elegido = None
+        for p in posts:
+                                                                          
+            if not p['data']['stickied'] and p['data']['num_comments'] > 50:
+                post_elegido = p['data']
                 break
         
-        if not url_post_elegido:
-            print("❌ No se encontró ningún post bueno hoy.")
-            return [], []
-            
-        print(f"✅ Post Elegido: {titulo_post}")
-        print(f"🔗 Link: {url_post_elegido}")
+        if not post_elegido: 
+            print("❌ No se encontró un post adecuado.")
+            return None, None, None
 
-                                                                                
-        url_json_post = url_post_elegido[:-1] + ".json"
-        respuesta = requests.get(url_json_post, headers=headers)
+        titulo_en = post_elegido['title']
+        url_comments = f"https://www.reddit.com{post_elegido['permalink']}"
+        if url_comments.endswith("/"): url_comments = url_comments[:-1]
         
-        datos = respuesta.json()
-        comentarios = datos[1]['data']['children']
+        print(f"✅ Post encontrado: {titulo_en}")
         
-                            
-        META_CARACTERES = DURACION_OBJETIVO_MINUTOS * 60 * 12
-        historias_seleccionadas = []
-        total_chars = 0
-        ids_nuevos = []
+                                     
+                                                         
+        time.sleep(2) 
+        resp_comm = requests.get(f"{url_comments}.json?raw_json=1", headers=headers)
         
-                                                       
-        titulo_es = traducir_a_espanol(titulo_post)
-        historias_seleccionadas.append(f"La pregunta de hoy es: {titulo_es}")
+        if resp_comm.status_code != 200:
+            print(f"❌ Error al entrar al post: Código {resp_comm.status_code}")
+            return None, None, None
 
-                             
+        comentarios = resp_comm.json()[1]['data']['children']
         random.shuffle(comentarios)
-
+        
+        textos_en = []
+        textos_es = []
+        ids_nuevos = []
+        total_chars = 0
+        META = DURACION_OBJETIVO_MINUTOS * 60 * 14
+        
+                
+        titulo_es = traducir_a_espanol(titulo_en)
+        textos_en.append(f"Title: {titulo_en}")
+        textos_es.append(f"La pregunta es: {titulo_es}")
+        
+        print("📝 Recopilando y traduciendo historias...")
         for c in comentarios:
             if c['kind'] == 't1' and 'body' in c['data']:
-                texto_original = c['data']['body']
-                c_id = c['data']['id']
+                body = c['data']['body']
+                cid = c['data']['id']
                 
-                         
-                if (c_id not in historial_usados and 
-                    c_id not in ids_nuevos and 
-                    len(texto_original) > 300 and "[deleted]" not in texto_original):
+                if cid not in historial_usados and len(body) > 200 and "[deleted]" not in body:
+                    print(f"   - Procesando historia ID {cid}...")
+                    textos_en.append(f"\n--- Story ID {cid} ---\n{body}")
                     
-                    print(f"   Using ID: {c_id} ({len(texto_original)} chars). Traduciendo...")
+                    trad = traducir_a_espanol(body)
+                    textos_es.append(trad)
                     
-                                
-                    texto_espanol = traducir_a_espanol(texto_original)
+                    ids_nuevos.append(cid)
+                    total_chars += len(trad)
                     
-                    historias_seleccionadas.append(texto_espanol)
-                    ids_nuevos.append(c_id)
-                    total_chars += len(texto_espanol)
-                    
-                    print(f"   ✅ Traducido. Total: {total_chars}/{META_CARACTERES}")
-                    
-                    if total_chars >= META_CARACTERES:
-                        break
+                    if total_chars >= META: break
+        
+                      
+        with open(os.path.join(carpeta_destino, "1-ingles.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(textos_en))
             
-        return historias_seleccionadas, ids_nuevos
+        with open(os.path.join(carpeta_destino, "1-espanol.txt"), "w", encoding="utf-8") as f:
+            f.write("\n\n".join(textos_es))
+            
+        return textos_es, ids_nuevos
 
     except Exception as e:
-        print(f"Error crítico: {e}")
-        return [], []
+        print(f"❌ Error crítico en Reddit: {e}")
+                                                     
+                           
+        return None, None, None
 
-                                       
-async def generar_audio_lento(lista_textos):
-    archivos_audio = []
-    print(f"🔊 Generando {len(lista_textos)} audios con IA (Velocidad {VELOCIDAD_VOZ})...")
-    
-    for i, texto in enumerate(lista_textos):
-        archivo = f"temp_part_{i}.mp3"
+                  
+async def generar_audio(carpeta, textos):
+    archivos = []
+    print("🔊 Generando audios...")
+    for i, txt in enumerate(textos):
+        ruta = os.path.join(carpeta, f"audio_part_{i}.mp3")
         try:
-                                                      
-            communicate = edge_tts.Communicate(texto, VOZ_IA, rate=VELOCIDAD_VOZ)
-            await communicate.save(archivo)
-            archivos_audio.append(archivo)
+            communicate = edge_tts.Communicate(txt, VOZ_IA, rate=VELOCIDAD_VOZ)
+            await communicate.save(ruta)
+            archivos.append(ruta)
         except Exception as e:
-            print(f"   Error generando audio {i}: {e}")
-            
-    return archivos_audio
+            print(f"Error audio {i}: {e}")
+    return archivos
 
-                                  
-def generar_imagenes_ia(cantidad):
-    lista_imagenes = []
-    print(f"🎨 Generando {cantidad} imágenes únicas...")
-    
+                     
+def descargar_imagenes(carpeta, cantidad):
+    rutas = []
     prompts = [
-        "cinematic dark mystery story background 4k",
-        "atmospheric horror rainy night window view",
-        "creepy liminal space corridor realistic",
-        "dramatic foggy street night lighting",
-        "abstract fear dark psychological thriller art"
+        "cinematic dark mystery atmosphere 4k", "creepy forest night fog realistic",
+        "abandoned building interior dark lighting", "rainy window night city view",
+        "shadowy silhouette horror thriller art", "vintage old photo mystery style",
+        "surreal dreamscape dark fantasy", "noir detective style rainy street",
+        "gothic architecture night fog", "abstract fear anxiety texture"
     ]
     
+    print("🎨 Descargando imágenes...")
     for i in range(cantidad):
-        nombre = f"fondo_ia_{i}.jpg"
-                                     
-        prompt = prompts[i % len(prompts)] + f" {random.randint(1,5000)}"
+        ruta = os.path.join(carpeta, f"img_{i}.jpg")
+                                                        
+        prompt = prompts[i % len(prompts)] + f" {random.randint(1,999999)}"
         url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}"
         
         try:
             resp = requests.get(url, timeout=30)
             if resp.status_code == 200:
-                with open(nombre, 'wb') as f:
+                with open(ruta, "wb") as f:
                     f.write(resp.content)
-                lista_imagenes.append(nombre)
-                print(f"   - Imagen {i+1} lista.")
-            time.sleep(2)
+                rutas.append(ruta)
+                print(f"   - Imagen {i+1} guardada.")
+            time.sleep(1.5) 
         except:
             pass
             
-    return lista_imagenes
+    if not rutas and os.path.exists("fondo.jpg"):
+        shutil.copy("fondo.jpg", os.path.join(carpeta, "fondo_backup.jpg"))
+        rutas.append(os.path.join(carpeta, "fondo_backup.jpg"))
+        
+    return rutas
 
-                               
-def ensamblar_video():
-                           
+                  
+def armar_video():
+    carpeta = crear_carpeta_proyecto()
     historial = cargar_historial()
-    textos, nuevos_ids = obtener_pack_historias(historial)
     
-    if not textos:
-        print("❌ No se encontraron historias válidas.")
+                  
+    textos_es, ids = obtener_contenido_reddit(carpeta, historial)
+    if not textos_es: 
+        print("❌ No se pudo obtener contenido. Abortando.")
+        return
+    
+              
+    audios = asyncio.run(generar_audio(carpeta, textos_es))
+    if not audios: return
+    
+                 
+    imagenes = descargar_imagenes(carpeta, CANTIDAD_IMAGENES)
+    if not imagenes: 
+        print("❌ Sin imágenes.")
         return
 
-              
-    archivos_audio_temp = asyncio.run(generar_audio_lento(textos))
-    if not archivos_audio_temp: return
-
-                 
-    imagenes_files = generar_imagenes_ia(CANTIDAD_IMAGENES)
-                                                        
-    if not imagenes_files:
-        if os.path.exists("fondo.jpg"):
-            imagenes_files = ["fondo.jpg"]
-        else:
-            print("❌ No hay imágenes generadas ni fondo.jpg.")
-            return
-
-    print("--- 🎬 Renderizando Video Final ---")
-    
+    print("--- 🎬 Renderizando ---")
     try:
-                                            
-        clips_audio = [AudioFileClip(f) for f in archivos_audio_temp]
-        audio_final = concatenate_audioclips(clips_audio)
-        duracion_total = audio_final.duration
-        print(f"⏱️ Duración Total del Video: {duracion_total/60:.2f} minutos.")
-
-                                                  
-                                                                             
-                                                                      
-        cantidad_clips_visuales = int(math.ceil(duracion_total / TIEMPO_POR_IMAGEN))
-        
-        clips_video = []
-        print(f"   - Creando {cantidad_clips_visuales} cambios de imagen...")
-        
-        for i in range(cantidad_clips_visuales):
-                                                                     
-            img_actual = imagenes_files[i % len(imagenes_files)]
-            
-                                       
-            clip = ImageClip(img_actual).set_duration(TIEMPO_POR_IMAGEN)
-            clips_video.append(clip)
-
-                           
-        video_final = concatenate_videoclips(clips_video)
-        video_con_audio = video_final.set_audio(audio_final)
+                    
+        clips_aud = [AudioFileClip(a) for a in audios]
+        audio_final = concatenate_audioclips(clips_aud)
+        duracion = audio_final.duration
+        audio_path = os.path.join(carpeta, "audio_completo.mp3")
+        audio_final.write_audiofile(audio_path)
+        print(f"⏱️ Duración: {duracion/60:.1f} min")
 
                      
-        nombre_salida = f"video_reddit_{int(time.time())}.mp4"
-        print(f"   Exportando a {nombre_salida}...")
-        video_con_audio.write_videofile(nombre_salida, fps=24, verbose=False, logger=None)
-
+        clips_vid = []
+                                   
+        num_clips = int(math.ceil(duracion / TIEMPO_POR_IMAGEN))
+        
+        print(f"   - Creando {num_clips} segmentos de video...")
+        
+        for i in range(num_clips):
+            img_path = imagenes[i % len(imagenes)]
+            
+                                                                         
+            clip = ImageClip(img_path).set_duration(TIEMPO_POR_IMAGEN).set_fps(24)
+            clip = clip.crossfadein(1.0)
+            clips_vid.append(clip)
+            
+        video = concatenate_videoclips(clips_vid, method="compose")
+        video = video.set_duration(duracion)
+        video = video.set_audio(AudioFileClip(audio_path))
+        
+        salida = os.path.join(carpeta, "Video_Final.mp4")
+        video.write_videofile(salida, fps=24, threads=4, codec="libx264")
+        
+        print(f"✅ ¡LISTO! Todo guardado en: {carpeta}")
+        guardar_lista_historial(ids)
+        
+        video.close()
+        audio_final.close()
                                
-        print("🧹 Limpiando archivos temporales...")
-        for f in archivos_audio_temp + imagenes_files:
-            try: os.remove(f)
-            except: pass
-
-                              
-        guardar_lista_historial(nuevos_ids)
-        print(f"✅ ¡Video creado exitosamente! Guardado en: {nombre_salida}")
+        for c in clips_aud: c.close()
 
     except Exception as e:
-        print(f"❌ Error al renderizar: {e}")
+        print(f"❌ Error fatal en renderizado: {e}")
 
-              
 if __name__ == "__main__":
-    print("=" * 50)
-    print("🚀 GENERADOR DE VIDEOS REDDIT -> ESPAÑOL")
-    print("=" * 50)
-    ensamblar_video()
+    armar_video()
