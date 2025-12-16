@@ -26,7 +26,7 @@ VOZ_ID_LOCAL_POR_DEFECTO = (
 VELOCIDAD_WPM_POR_DEFECTO = 200
 
                                           
-VELOCIDAD_EDGE = "-15%"
+VELOCIDAD_EDGE = "-20%"
 
 
 def _parece_voz_edge(voz: str | None) -> bool:
