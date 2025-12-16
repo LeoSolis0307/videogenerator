@@ -2,7 +2,11 @@ from core import reddit_scraper
 from core import tts
 from core import image_downloader
 from core import text_processor
-from core.video_renderer import render_video_ffmpeg
+from core.video_renderer import (
+    append_intro_to_video,
+    combine_audios_with_silence,
+    render_video_ffmpeg,
+)
 from utils.fs import crear_carpeta_proyecto
 
 
@@ -50,10 +54,12 @@ def main():
                                                                                  
     audios = tts.generar_audios(textos_es, carpeta, voz=VOZ, velocidad=VELOCIDAD)
 
-
     if not audios:
         print("[MAIN] No se generaron audios")
         return
+
+                                                                                
+    audio_final = combine_audios_with_silence(audios, carpeta, gap_seconds=4)
 
                   
     imagenes = image_downloader.descargar_imagenes(carpeta, 10)
@@ -62,8 +68,11 @@ def main():
         print("[MAIN] No se descargaron imágenes")
         return
 
-                                                           
-    render_video_ffmpeg(imagenes, audios[0], carpeta)
+                                                                                
+    video_final = render_video_ffmpeg(imagenes, audio_final, carpeta)
+
+                                                                                                    
+    append_intro_to_video(video_final, title_text=textos_es[0])
 
     print("[MAIN] ✅ Proceso finalizado")
 
