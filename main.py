@@ -1,22 +1,68 @@
-import asyncio
-from core import reddit_scraper, text_processor, tts_engine, image_fetcher, video_renderer
-from utils.fs import crear_carpeta, cargar_historial, guardar_historial
+from core import reddit_scraper
+from core import tts
+from core import image_downloader
+from core import text_processor
+from core.video_renderer import render_video_ffmpeg
+from utils.fs import crear_carpeta_proyecto
+
+
+VOZ = "es-MX-JorgeNeural"
+VELOCIDAD = "-15%"
 
 def main():
-    carpeta = crear_carpeta()
-    historial = cargar_historial()
+    print("[MAIN] Iniciando proceso")
 
+                                    
+    carpeta = crear_carpeta_proyecto()
+
+                      
     post = reddit_scraper.obtener_post()
-    comments = reddit_scraper.obtener_comentarios(post["permalink"])
+    if not post:
+        print("[MAIN] No se pudo obtener post")
+        return
 
-    textos, ids = text_processor.filtrar_comentarios(comments, historial)
+                             
+    comentarios = reddit_scraper.obtener_comentarios(post["permalink"])
 
-    audios = asyncio.run(tts_engine.texto_a_audio(textos, carpeta))
-    imagenes = image_fetcher.descargar_imagenes(carpeta, 10)
+    textos_en = [
+        c["data"]["body"]
+        for c in comentarios
+        if c["kind"] == "t1"
+        and len(c["data"].get("body", "")) > 200
+        and "[deleted]" not in c["data"]["body"]
+    ][:30]
 
-    video_renderer.render_video(audios, imagenes, carpeta)
+    if not textos_en:
+        print("[MAIN] No hay textos suficientes")
+        return
 
-    guardar_historial(ids)
+    print(f"[MAIN] {len(textos_en)} textos obtenidos")
+
+                              
+    textos_es = text_processor.traducir_lista(textos_en)
+
+    print("[DEBUG] Primer texto que irá al TTS:")
+    print(textos_es[0][:200])
+
+             
+    audios = tts.generar_audios(textos_es, carpeta)
+
+
+    if not audios:
+        print("[MAIN] No se generaron audios")
+        return
+
+                  
+    imagenes = image_downloader.descargar_imagenes(carpeta, 10)
+
+    if not imagenes:
+        print("[MAIN] No se descargaron imágenes")
+        return
+
+                                                           
+    render_video_ffmpeg(imagenes, audios[0], carpeta)
+
+    print("[MAIN] ✅ Proceso finalizado")
 
 if __name__ == "__main__":
     main()
