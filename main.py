@@ -6,8 +6,10 @@ from core.video_renderer import render_video_ffmpeg
 from utils.fs import crear_carpeta_proyecto
 
 
-VOZ = "es-MX-JorgeNeural"
-VELOCIDAD = "-15%"
+# Si pones un ID HKEY_... se usa pyttsx3 (offline).
+# Si pones una voz "*Neural" se usa edge-tts (online).
+VOZ = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_ES-MX_SABINA_11.0"
+VELOCIDAD = "-17%"
 
 def main():
     print("[MAIN] Iniciando proceso")
@@ -45,7 +47,8 @@ def main():
     print(textos_es[0][:200])
 
     # 5️⃣ TTS
-    audios = tts.generar_audios(textos_es, carpeta)
+    # Si VOZ termina en "Neural" se usa edge-tts; si no, se usa pyttsx3 (offline)
+    audios = tts.generar_audios(textos_es, carpeta, voz=VOZ, velocidad=VELOCIDAD)
 
 
     if not audios:
