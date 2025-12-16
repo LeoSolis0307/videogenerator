@@ -2,6 +2,8 @@ import requests
 import time
 import random
 
+from utils.fs import cargar_historial, guardar_historial
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Accept": "application/json",
@@ -13,17 +15,39 @@ def obtener_post():
     print("[REDDIT] Buscando post viral...")
     time.sleep(2)
 
-    url = "https://old.reddit.com/r/AskReddit/top/.json?t=week&limit=10&raw_json=1"
+    historial = cargar_historial()
+
+                                                         
+    url = "https://old.reddit.com/r/AskReddit/top/.json?t=week&limit=25&raw_json=1"
     r = requests.get(url, headers=HEADERS, timeout=15)
     r.raise_for_status()
 
     posts = r.json()["data"]["children"]
 
+                                                           
+    random.shuffle(posts)
+
     for p in posts:
         d = p["data"]
-        if not d.get("stickied") and d.get("num_comments", 0) > 100:
-            print(f"[REDDIT] Post encontrado: {d['title']}")
-            return d
+        if d.get("stickied"):
+            continue
+        if d.get("num_comments", 0) <= 100:
+            continue
+
+        titulo = (d.get("title") or "").strip()
+        post_id = (d.get("id") or "").strip()
+
+                                                                                
+        key_titulo = f"reddit_title:{' '.join(titulo.split()).lower()}"
+        key_id = f"reddit_post:{post_id.lower()}" if post_id else ""
+
+        if key_titulo in historial or (key_id and key_id in historial):
+            print(f"[REDDIT] Saltando repetido: {titulo}")
+            continue
+
+        print(f"[REDDIT] Post encontrado: {titulo}")
+        guardar_historial([k for k in (key_titulo, key_id) if k])
+        return d
 
     print("[REDDIT] No se encontró post válido")
     return None
