@@ -11,12 +11,15 @@ HISTORIAL_FILE = "storage/historial.txt"
                            
           
                            
-def crear_carpeta_proyecto(prefix="Video") -> str:
+def crear_carpeta_proyecto(prefix=None) -> str:
     \
 \
 \
+\
+\
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    carpeta = os.path.join(BASE_OUTPUT_DIR, f"{prefix}_{timestamp}")
+    nombre = f"{prefix}_{timestamp}" if prefix else timestamp
+    carpeta = os.path.join(BASE_OUTPUT_DIR, nombre)
     os.makedirs(carpeta, exist_ok=True)
     return carpeta
 

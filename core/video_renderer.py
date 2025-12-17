@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import random
 import re
 import subprocess
 import wave
@@ -10,6 +11,8 @@ import imageio_ffmpeg
 DEFAULT_INTRO_PATH = r"C:\Users\Leonardo\Downloads\video\intro.mp4"
 MIN_VIDEO_SEC = 15 * 60
 MAX_VIDEO_SEC = 30 * 60
+DEFAULT_VIDEOS_DIR = r"C:\Users\Leonardo\Downloads\video\media"
+SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
 
 def _ffmpeg_path(path: str) -> str:
@@ -20,6 +23,7 @@ def _ffmpeg_path(path: str) -> str:
 def _audio_duration_seconds(path: str) -> float:
     if not os.path.exists(path):
         return 0.0
+
     ext = os.path.splitext(path)[1].lower()
     if ext == ".wav":
         try:
@@ -29,29 +33,274 @@ def _audio_duration_seconds(path: str) -> float:
                 return frames / float(rate)
         except Exception:
             return 0.0
-    try:
-        import subprocess, json
 
-        ffprobe = imageio_ffmpeg.get_ffmpeg_exe().replace("ffmpeg", "ffprobe")
-        result = subprocess.run(
-            [
-                ffprobe,
-                "-v",
-                "quiet",
-                "-print_format",
-                "json",
-                "-show_format",
-                path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        data = json.loads(result.stdout or "{}")
-        dur = float(data.get("format", {}).get("duration", 0.0))
-        return dur
-    except Exception:
+    import re
+
+    def _parse_duration_text(text: str) -> float:
+                                             
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:[\.,]\d+)?)", text, re.IGNORECASE)
+        if m:
+            h, mnt, sec = m.groups()
+            return int(h) * 3600 + int(mnt) * 60 + float(sec.replace(",", "."))
+                       
+        m = re.search(r"Duraci[óo]n:\s*(\d+):(\d+):(\d+(?:[\.,]\d+)?)", text, re.IGNORECASE)
+        if m:
+            h, mnt, sec = m.groups()
+            return int(h) * 3600 + int(mnt) * 60 + float(sec.replace(",", "."))
+                                            
+        times = re.findall(r"time=(\d+):(\d+):(\d+(?:[\.,]\d+)?)", text)
+        if times:
+            h, mnt, sec = times[-1]
+            return int(h) * 3600 + int(mnt) * 60 + float(sec.replace(",", "."))
         return 0.0
+
+    def _run(cmd) -> str:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=12)
+            return ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+        except Exception:
+            return ""
+
+    try:
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        ffmpeg_bin = "ffmpeg"
+
+    ffprobe_guess = ffmpeg_bin.replace("ffmpeg", "ffprobe")
+
+                                 
+    if os.path.exists(ffprobe_guess):
+        out = _run([ffprobe_guess, "-v", "quiet", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path])
+        try:
+            val = float(out.strip().splitlines()[0])
+            if val > 0:
+                return val
+        except Exception:
+            pass
+
+                        
+    out = _run(["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", path])
+    try:
+        val = float(out.strip().splitlines()[0])
+        if val > 0:
+            return val
+    except Exception:
+        pass
+
+                           
+    out = _run([ffmpeg_bin, "-v", "info", "-i", path])
+    dur = _parse_duration_text(out)
+    if dur > 0:
+        return dur
+
+                                       
+    out = _run([ffmpeg_bin, "-v", "info", "-i", path, "-f", "null", "-"])
+    dur = _parse_duration_text(out)
+    if dur > 0:
+        return dur
+
+                     
+    if out:
+        print(f"[VIDEO] ⚠️ No se pudo leer duración. Fragmento de salida:\n{out[:4000]}")
+
+    return 0.0
+
+
+def audio_duration_seconds(path: str) -> float:
+    \
+    return _audio_duration_seconds(path)
+
+
+def _debug_dump_duration(path: str):
+    \
+    print(f"[VIDEO-DEBUG] Dump de duración para: {path}")
+    try:
+        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffprobe_guess = ffmpeg_bin.replace("ffmpeg", "ffprobe")
+    except Exception as e:
+        ffmpeg_bin = "ffmpeg"
+        ffprobe_guess = "ffprobe"
+        print(f"[VIDEO-DEBUG] No se pudo obtener ffmpeg de imageio: {e}")
+
+    cmds = [
+        [ffprobe_guess, "-v", "debug", "-show_format", "-show_streams", path],
+        ["ffprobe", "-v", "debug", "-show_format", "-show_streams", path],
+        [ffmpeg_bin, "-v", "info", "-i", path, "-f", "null", "-"],
+        [ffmpeg_bin, "-v", "info", "-i", path],
+    ]
+
+    for idx, cmd in enumerate(cmds, 1):
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            out = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+            print(f"[VIDEO-DEBUG] Cmd {idx}: {' '.join(cmd[:4])} ...")
+            print(out[:4000])
+        except Exception as e:
+            print(f"[VIDEO-DEBUG] Cmd {idx} falló: {e}")
+
+
+def _pick_video_file(videos_dir: str | None = None) -> str | None:
+    \
+\
+\
+\
+    base = videos_dir or DEFAULT_VIDEOS_DIR
+    base_abs = os.path.abspath(base)
+    if not os.path.isdir(base_abs):
+        print(f"[VIDEO] Carpeta no encontrada: {base_abs}")
+        return None
+
+    candidatos = []
+    nombres = os.listdir(base_abs)
+    hubo_con_0 = False
+    for nombre in nombres:
+        if nombre.startswith("0"):
+            hubo_con_0 = True
+            continue
+        ext = os.path.splitext(nombre)[1].lower()
+        if ext in SUPPORTED_VIDEO_EXTS:
+            candidatos.append(os.path.join(base_abs, nombre))
+
+    if not candidatos:
+        if hubo_con_0 and any(os.path.splitext(n)[1].lower() in SUPPORTED_VIDEO_EXTS for n in nombres):
+            print("[VIDEO] Todos los videos disponibles ya fueron usados (empiezan con 0).")
+        else:
+            print(f"[VIDEO] No se hallaron videos en {base_abs} (ext: {', '.join(sorted(SUPPORTED_VIDEO_EXTS))})")
+        return None
+
+    elegido = random.choice(candidatos)
+    print(f"[VIDEO] Video elegido: {elegido}")
+    return elegido
+
+
+def select_video_base(videos_dir: str | None = None) -> tuple[str | None, float]:
+    \
+    ruta = _pick_video_file(videos_dir)
+    if not ruta:
+        return None, 0.0
+    dur = _audio_duration_seconds(ruta)
+    print(f"[VIDEO] Duración detectada para base: {dur:.2f}s")
+    if dur <= 0:
+        _debug_dump_duration(ruta)
+    return ruta, dur
+
+
+def _calc_speed_and_padding(video_dur: float, audio_dur: float, *, max_speed: float = 2.5) -> tuple[float, float]:
+    \
+\
+\
+\
+\
+\
+    if audio_dur <= 0 or video_dur <= 0:
+        return 1.0, 0.0
+
+                                                                      
+    diff = abs(video_dur - audio_dur)
+    if diff <= max(2.0, audio_dur * 0.02):
+        return 1.0, 0.0
+
+    if video_dur > audio_dur:
+        speed = max(1.0, video_dur / audio_dur)
+        speed = min(speed, max_speed)
+                                                                                   
+        new_dur = video_dur / speed
+        if new_dur > audio_dur:
+            return speed, max(0.0, new_dur - audio_dur)
+        return speed, 0.0
+
+                                                               
+    return 1.0, max(0.0, audio_dur - video_dur)
+
+
+def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida: str, *, videos_dir: str | None = None):
+    \
+\
+\
+\
+\
+\
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+
+    video_fs = video_path or _pick_video_file(videos_dir)
+    if not video_fs:
+        raise FileNotFoundError("[VIDEO] No hay video base disponible")
+
+    video_abs = os.path.abspath(video_fs)
+    audio_abs = os.path.abspath(audio_path)
+    salida = os.path.join(os.path.abspath(carpeta_salida), "Video_Final.mp4")
+
+    if not os.path.exists(video_abs):
+        raise FileNotFoundError(f"[VIDEO] No se encontró el video base: {video_abs}")
+    if not os.path.exists(audio_abs):
+        raise FileNotFoundError(f"[VIDEO] No se encontró el audio: {audio_abs}")
+
+    dur_video = _audio_duration_seconds(video_abs)
+    dur_audio = _audio_duration_seconds(audio_abs)
+    speed, pad_sec = _calc_speed_and_padding(dur_video, dur_audio)
+
+    filtros = []
+    if speed != 1.0:
+        filtros.append(f"setpts=PTS/{speed}")
+    filtros.append("scale=768:768:force_original_aspect_ratio=decrease")
+    filtros.append("pad=768:768:(768-iw)/2:(768-ih)/2")
+    filtros.append("setsar=1")
+    filtros.append("fps=25")
+    if pad_sec > 0.05:
+        filtros.append(f"tpad=stop_duration={pad_sec:.3f}")
+
+    filter_chain = ",".join(filtros)
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        _ffmpeg_path(video_abs),
+        "-i",
+        _ffmpeg_path(audio_abs),
+        "-filter_complex",
+        f"[0:v]{filter_chain}[v0]",
+        "-map",
+        "[v0]",
+        "-map",
+        "1:a",
+        "-c:v",
+        "h264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        _ffmpeg_path(salida),
+    ]
+
+    print(f"[VIDEO] Base: {video_abs} (dur ~{dur_video:.1f}s) | Audio ~{dur_audio:.1f}s")
+    if speed != 1.0:
+        print(f"[VIDEO] Acelerando video x{speed:.3f}")
+    if pad_sec > 0.05:
+        print(f"[VIDEO] Extendiendo último frame {pad_sec:.2f}s para empatar audio")
+
+    subprocess.run(cmd, check=True)
+    print(f"[VIDEO] ✅ Video final renderizado: {salida}")
+
+                                                                                        
+    try:
+        base_dir = os.path.dirname(video_abs)
+        base_name = os.path.basename(video_abs)
+        if not base_name.startswith("0"):
+            new_name = "0" + base_name
+            new_path = os.path.join(base_dir, new_name)
+                                          
+            while os.path.exists(new_path):
+                new_name = "0" + new_name
+                new_path = os.path.join(base_dir, new_name)
+            os.rename(video_abs, new_path)
+            print(f"[VIDEO] Renombrado para no reutilizar: {new_path}")
+    except Exception as e:
+        print(f"[VIDEO] ⚠️ No se pudo renombrar el video usado: {e}")
+
+    return salida
 
 
 def _normalize_audio_to_wav(src: str, dst: str, *, rate: int = 48000, channels: int = 1) -> str:
@@ -73,7 +322,12 @@ def _normalize_audio_to_wav(src: str, dst: str, *, rate: int = 48000, channels: 
     return dst
 
 
-def combine_audios_with_silence(audios, carpeta, gap_seconds=4):
+def combine_audios_with_silence(audios, carpeta, gap_seconds=4, *, min_seconds: int | None = MIN_VIDEO_SEC, max_seconds: int | None = MAX_VIDEO_SEC):
+    \
+\
+\
+\
+\
     if not audios:
         raise ValueError("[AUDIO] Lista de audios vacía")
 
@@ -92,8 +346,8 @@ def combine_audios_with_silence(audios, carpeta, gap_seconds=4):
             dst = os.path.join(carpeta_abs, f"audio_norm_{idx}.wav")
             norm_paths.append(_normalize_audio_to_wav(a, dst, rate=rate, channels=channels))
 
-        max_frames = int(MAX_VIDEO_SEC * rate)
-        min_frames = int(MIN_VIDEO_SEC * rate)
+        max_frames = int(max_seconds * rate) if max_seconds else None
+        min_frames = int(min_seconds * rate) if min_seconds else None
         total_frames = 0
         gap_frames = int(gap_seconds * rate)
 
@@ -107,7 +361,7 @@ def combine_audios_with_silence(audios, carpeta, gap_seconds=4):
                     frames = r.readframes(r.getnframes())
                 frames_len = len(frames) // (channels * sampwidth)
 
-                if total_frames + frames_len > max_frames:
+                if max_frames is not None and total_frames + frames_len > max_frames:
                     needed = max_frames - total_frames
                     if needed > 0:
                         out_w.writeframes(frames[: needed * channels * sampwidth])
@@ -118,12 +372,14 @@ def combine_audios_with_silence(audios, carpeta, gap_seconds=4):
                 total_frames += frames_len
 
                 is_last = i == len(norm_paths) - 1
-                if not is_last and total_frames < max_frames:
-                    add_gap = min(gap_frames, max_frames - total_frames)
+                if not is_last and (max_frames is None or total_frames < max_frames):
+                    add_gap = gap_frames
+                    if max_frames is not None:
+                        add_gap = min(add_gap, max_frames - total_frames)
                     out_w.writeframes(b"\x00" * add_gap * channels * sampwidth)
                     total_frames += add_gap
 
-            if total_frames < min_frames:
+            if min_frames is not None and total_frames < min_frames:
                 pad_frames = min_frames - total_frames
                 out_w.writeframes(b"\x00" * pad_frames * channels * sampwidth)
                 total_frames += pad_frames

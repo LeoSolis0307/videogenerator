@@ -17,21 +17,38 @@ def obtener_post():
 
     historial = cargar_historial()
 
-                                                         
-    url = "https://old.reddit.com/r/AskReddit/top/.json?t=week&limit=25&raw_json=1"
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    r.raise_for_status()
+    fuentes = [
+        "https://old.reddit.com/r/AskReddit/top/.json?t=week&limit=50&raw_json=1",
+        "https://old.reddit.com/r/AskReddit/top/.json?t=month&limit=50&raw_json=1",
+        "https://old.reddit.com/r/AskReddit/top/.json?t=year&limit=50&raw_json=1",
+        "https://old.reddit.com/r/AskReddit/hot/.json?limit=50&raw_json=1",
+    ]
 
-    posts = r.json()["data"]["children"]
+    vistos = set()
+    posts_combo = []
+
+    for url in fuentes:
+        try:
+            r = requests.get(url, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            posts = r.json()["data"]["children"]
+            for p in posts:
+                pid = p["data"].get("id", "")
+                if pid in vistos:
+                    continue
+                vistos.add(pid)
+                posts_combo.append(p)
+        except Exception as e:
+            print(f"[REDDIT] Fuente falló ({url}): {e}")
 
                                                            
-    random.shuffle(posts)
+    random.shuffle(posts_combo)
 
-    for p in posts:
+    for p in posts_combo:
         d = p["data"]
         if d.get("stickied"):
             continue
-        if d.get("num_comments", 0) <= 100:
+        if d.get("num_comments", 0) <= 50:
             continue
 
         titulo = (d.get("title") or "").strip()
