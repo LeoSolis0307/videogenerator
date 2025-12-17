@@ -1,10 +1,13 @@
-from core import reddit_scraper
-from core import tts
+import os
+
 from core import image_downloader
+from core import reddit_scraper
 from core import text_processor
+from core import tts
 from core.video_renderer import (
     append_intro_to_video,
     combine_audios_with_silence,
+    render_story_clip,
     render_video_ffmpeg,
 )
 from utils.fs import crear_carpeta_proyecto
@@ -67,6 +70,12 @@ def main():
     if not imagenes:
         print("[MAIN] No se descargaron imágenes")
         return
+
+                                                      
+    cortos_dir = os.path.join(carpeta, "cortos")
+    for idx, (audio_path, texto) in enumerate(zip(audios, textos_es)):
+        img = imagenes[idx % len(imagenes)]
+        render_story_clip(audio_path, img, cortos_dir, title_text=texto)
 
                                                                                 
     video_final = render_video_ffmpeg(imagenes, audio_final, carpeta)

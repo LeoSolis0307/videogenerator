@@ -261,3 +261,35 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
 
     print(f"[VIDEO] ✅ Intro agregada: {salida_fs}")
     return salida_fs
+
+
+def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
+    if not os.path.exists(audio_path):
+        raise FileNotFoundError(f"[CLIP] Audio no encontrado: {audio_path}")
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"[CLIP] Imagen no encontrada: {image_path}")
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    os.makedirs(carpeta_salida, exist_ok=True)
+
+    nombre = _slugify_title(title_text) if title_text else "clip"
+    salida_fs = os.path.join(carpeta_salida, f"{nombre}.mp4")
+
+    cmd = [
+        ffmpeg, "-y",
+        "-loop", "1",
+        "-i", _ffmpeg_path(image_path),
+        "-i", _ffmpeg_path(audio_path),
+        "-c:v", "h264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-shortest",
+        "-r", "25",
+        "-movflags", "+faststart",
+        _ffmpeg_path(salida_fs),
+    ]
+
+    print(f"[CLIP] Renderizando corto: {salida_fs}")
+    subprocess.run(cmd, check=True)
+    print(f"[CLIP] ✅ Generado: {salida_fs}")
+    return salida_fs
