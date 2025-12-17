@@ -97,7 +97,7 @@ def main():
 
 	if usar_video_base and video_base_dur > 0:
 		gap = 4.0
-		target_min = video_base_dur * 0.85
+		target_min = video_base_dur * 0.80                                         
 		target_max = video_base_dur * 1.02
 		over_shoot = target_max * 2.50                                                            
 
@@ -235,8 +235,8 @@ def main():
 
 		if acumulado < target_min:
 			faltante = target_min - acumulado
-                                                                 
-			pad = min(faltante, 20.0)
+                                                                                          
+			pad = min(faltante, 2.0)
 			if pad > 0.1:
 				silencio = _crear_silencio(pad, carpeta)
 				seleccion_audios = [silencio] + seleccion_audios
