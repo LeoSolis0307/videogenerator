@@ -20,6 +20,16 @@ VOZ = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_ES-MX_
 VELOCIDAD = "-17%"
 
 
+def _pedir_entero(mensaje: str, *, minimo: int = 1, default: int = 1) -> int:
+	try:
+		val = int(input(mensaje).strip())
+		if val < minimo:
+			return default
+		return val
+	except Exception:
+		return default
+
+
 def _estimar_segundos(texto: str) -> float:
 	palabras = len((texto or "").split())
 	if palabras <= 0:
@@ -67,11 +77,8 @@ def _filtrar_comentarios(comentarios, limite=200):
 	return filtrados
 
 
-def main():
-	print("[MAIN] Iniciando proceso")
-
-	modo = input("Selecciona modo (1 = IA/imagenes, 2 = Video base): ").strip()
-	usar_video_base = modo == "2"
+def _generar_video(usar_video_base: bool, indice: int, total: int) -> bool:
+	print(f"[MAIN] ===== Video {indice}/{total} =====")
 
 	carpeta = crear_carpeta_proyecto()
 
@@ -81,16 +88,16 @@ def main():
 		video_base_path, video_base_dur = select_video_base(None)
 		if not video_base_path:
 			print("[MAIN] No se encontró video base utilizable")
-			return
+			return False
 		if video_base_dur <= 0:
 			print("[MAIN] No se pudo detectar duración del video base. Abortando.")
-			return
+			return False
 		print(f"[MAIN] Video base seleccionado: {video_base_path} (~{video_base_dur:.1f}s)")
 
 	post = reddit_scraper.obtener_post()
 	if not post:
 		print("[MAIN] No se pudo obtener post")
-		return
+		return False
 
 	comentarios = reddit_scraper.obtener_comentarios(post["permalink"])
 	comentarios_filtrados = _filtrar_comentarios(comentarios, limite=200)
@@ -171,7 +178,7 @@ def main():
 
 		if not seleccion:
 			print("[MAIN] No hay historias suficientes para el video base.")
-			return
+			return False
 
 		if acumulado < target_min:
 			print(
@@ -188,7 +195,7 @@ def main():
 
 	if not textos_en:
 		print("[MAIN] No hay textos suficientes")
-		return
+		return False
 
 	print(f"[MAIN] {len(textos_en)} textos obtenidos")
 
@@ -201,7 +208,7 @@ def main():
 
 	if not audios:
 		print("[MAIN] No se generaron audios")
-		return
+		return False
 
 	if usar_video_base:
 		gap = 4.0
@@ -231,7 +238,7 @@ def main():
 
 		if not seleccion_audios:
 			print("[MAIN] Los audios generados no caben en la duración del video base. Abortando.")
-			return
+			return False
 
 		if acumulado < target_min:
 			faltante = target_min - acumulado
@@ -248,7 +255,7 @@ def main():
 			print(f"[MAIN] Audio corto: se agregó {pad:.1f}s de silencio inicial (total estimado ~{acumulado:.1f}s)")
 			if acumulado < target_min:
 				print(f"[MAIN] Audio total ({acumulado:.1f}s) aún queda por debajo del 85% del video ({target_min:.1f}s). Abortando.")
-				return
+				return False
 
 		audios = seleccion_audios
 		textos_es = seleccion_textos
@@ -271,19 +278,25 @@ def main():
 				 f"[MAIN] Audio final fuera de rango ({audio_final_dur:.2f}s). "
 				 f"Debe estar entre {target_min:.2f}s y {target_max:.2f}s. Abortando."
 				)
-				return
+				return False
 			video_final = render_video_base_con_audio(video_base_path, audio_final, carpeta, videos_dir=None)
 		except Exception as e:
 			print(f"[MAIN] Error renderizando con video base: {e}")
-			return
+			return False
 	else:
-		audio_final = combine_audios_with_silence(audios, carpeta, gap_seconds=4)
+		audio_final = combine_audios_with_silence(
+		 audios,
+		 carpeta,
+		 gap_seconds=4,
+		 min_seconds=None,
+		 max_seconds=120,                                              
+		)
 
-		imagenes = image_downloader.descargar_imagenes(carpeta, 10)
+		imagenes = image_downloader.descargar_imagenes(carpeta, 1)                                              
 
 		if not imagenes:
 			print("[MAIN] No se descargaron imágenes")
-			return
+			return False
 
 		cortos_dir = os.path.join(carpeta, "cortos")
 		for idx, (audio_path, texto) in enumerate(zip(audios, textos_es)):
@@ -307,8 +320,21 @@ def main():
 	except Exception as e:
 		print(f"[MAIN] ⚠️ No se pudo guardar historial de historias usadas: {e}")
 
-	print("[MAIN] ✅ Proceso finalizado")
+	print("[MAIN] ✅ Video generado")
+	return True
 
 
 if __name__ == "__main__":
-	main()
+	print("[MAIN] Iniciando proceso")
+	total_videos = _pedir_entero("¿Cuántos videos generar en esta ejecución? (número entero): ", minimo=1, default=1)
+	modo = input("Selecciona modo (1 = IA/imagenes, 2 = Video base): ").strip()
+	usar_video_base = modo == "2"
+
+	exitos = 0
+	for i in range(total_videos):
+		try:
+			if _generar_video(usar_video_base, i + 1, total_videos):
+				exitos += 1
+		except Exception as e:
+			print(f"[MAIN] ⚠️ Error inesperado en video {i+1}/{total_videos}: {e}")
+	print(f"[MAIN] Finalizado: {exitos}/{total_videos} videos generados con éxito")

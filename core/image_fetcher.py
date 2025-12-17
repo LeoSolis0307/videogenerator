@@ -1,7 +1,9 @@
-import requests
-import time
-import random
 import os
+import random
+import time
+
+from PIL import Image
+import requests
 
 PROMPTS = [
     "dark cinematic atmosphere",
@@ -20,6 +22,18 @@ HEADERS = {
 
 TIMEOUT = 15
 REINTENTOS = 3
+
+
+def _recortar_abajo(path: str, porcentaje: float = 0.20) -> None:
+    try:
+        with Image.open(path) as img:
+            w, h = img.size
+            corte = int(h * porcentaje)
+            nuevo_h = max(1, h - corte)
+            recortada = img.crop((0, 0, w, nuevo_h))
+            recortada.save(path)
+    except Exception:
+        print(f"[IMG] ⚠️ No se pudo recortar {path}")
 
 
 def descargar_imagenes(carpeta, cantidad):
@@ -48,6 +62,7 @@ def descargar_imagenes(carpeta, cantidad):
                 if r.status_code == 200 and len(r.content) > 15_000:
                     with open(ruta, "wb") as f:
                         f.write(r.content)
+                    _recortar_abajo(ruta)
                     rutas.append(ruta)
                     exito = True
                     break
@@ -62,6 +77,7 @@ def descargar_imagenes(carpeta, cantidad):
             if os.path.exists("fallback.jpg"):
                 with open("fallback.jpg", "rb") as src, open(backup, "wb") as dst:
                     dst.write(src.read())
+                _recortar_abajo(backup)
                 rutas.append(backup)
 
         time.sleep(3)                            

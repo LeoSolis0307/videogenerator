@@ -437,6 +437,8 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None):
         "-safe", "0",
         "-i", img_list,
         "-i", audio_abs,
+        "-vf",
+        "fps=25,scale=768:768:force_original_aspect_ratio=decrease,pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1",
         "-c:v", "h264",                                         
         "-pix_fmt", "yuv420p",
         "-shortest",
@@ -531,11 +533,20 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
     nombre = _slugify_title(title_text) if title_text else "clip"
     salida_fs = os.path.join(carpeta_salida, f"{nombre}.mp4")
 
+                                                                                              
+    filter_complex = (
+        "[0:v]fps=25,scale=768:768:force_original_aspect_ratio=decrease,"
+        "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1[v0]"
+    )
+
     cmd = [
         ffmpeg, "-y",
         "-loop", "1",
         "-i", _ffmpeg_path(image_path),
         "-i", _ffmpeg_path(audio_path),
+        "-filter_complex", filter_complex,
+        "-map", "[v0]",
+        "-map", "1:a",
         "-c:v", "h264",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
