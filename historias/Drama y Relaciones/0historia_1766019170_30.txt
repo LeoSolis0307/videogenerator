@@ -1,0 +1,36 @@
+```json
+{
+  "historia": "
+
+Era un día como cualquier otro en la pequeña ciudad costera de Playa Negra. El sol brillaba alto en el cielo, y el olor a salitre y mar revolcándose entre las playas vacías era el mismo que había estado allí durante años.
+
+Hasta ese día.
+
+Luis se despertó con una sensación de vacío en su estómago. Su esposa, Ana, no estaba junto a él en la cama, lo que ya era motivo para preocuparse. Miró por la ventana y vio la misma calma tranquila del exterior. No había señales de movimiento o ruido fuera de lo normal.
+
+Después de desayunar solo, decidió buscarla en su trabajo como maestra en el colegio local. Su oficina estaba vacía y con la luz apagada. Los papeles sobre su escritorio estaban sin tocar. No había señal de lucha ni discusión.
+
+Luis se sintió cada vez más ansioso mientras caminaba por las calles desiertas, preguntándose si podría haber salido a dar un paseo o visitar algún amigo. La sensación de vacío en su estómago crecía.
+
+La búsqueda lo llevó a la casa familiar en el barrio antiguo, donde habían vivido durante los primeros años de su matrimonio. Miró por la ventana y vio que sus pertenencias todavía estaban allí, incluyendo una foto colgada en el sofá con una dedicación "Para siempre" escrita sobre ella.
+
+Con un sentimiento de desesperanza creciente, Luis decidió ir a casa de su amigo Tomás, quien era amigo cercano de Ana. Cuando llegó allí, la puerta estaba abierta. Entró y encontró a Tomás con cara de preocupación y mirada perdida.
+
+—Ana me llamó anoche después de medianoche, dijo que iba a irse para siempre —dijo Tomás, sin levantar la vista. 
+
+Luis se derrumbó en el sofá, abrumado por la noticia. Había estado intentando evitar pensar en el divorcio que ella había planeado desde hacía meses. El silencio entre ellos se había vuelto insoportable.
+
+—¿Por qué no me lo dijo? —Luis preguntó, intentando contener su dolor. 
+
+Tomás miró hacia él, con la boca torcida por el dolor. No tenía respuesta. Ninguno de los dos tenía palabras suficientes para explicar cómo Ana había llegado a ese punto y por qué no se lo dijo antes de dejarlo.
+
+Pasaron horas hablando en voz baja mientras observaban cómo se extinguía el día. Fue una conversación sin fin, donde ambos tratamos de hacer sentimientos claros, preguntas incómodas y aliviar el dolor. Ambos luchaban por entender qué había fallado tan profundamente que ella no pudo confiar en él, pero finalmente se dieron cuenta de que simplemente habían dejado que la vida los separara.
+
+Fue un día donde tuvimos que reconocer lo que ya sabíamos: que nos amábamos, y que éramos incapaces de hacerlo funcionar. Cuando el dolor comenzó a disminuir, ambos se dieron cuenta de que debían seguir adelante por sus propios caminos, pero con la diferencia de estar conscientes del daño causado al otro.
+
+Esa noche, Luis volvió a su casa solitario, sintiendo una mezcla de arrepentimiento y gratitud. Arrepentimiento por no haber visto el fin tan pronto como debería haberlo hecho; y gratitud porque al menos Ana se fue con dignidad para intentar construir algo nuevo.
+
+No sé cuándo seré capaz de escribir otra historia contigo, pero creo que la verdad es que esta es la primera vez desde que ella se fue que puedo pensar en empezar de nuevo. La playa está tranquila una vez más y el olor a salitre me recuerda al mar y su promesa de comenzar nuevamente cada mañana."
+
+}
+```

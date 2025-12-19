@@ -1,0 +1,23 @@
+```json
+{
+  "historia": "La familia que se desmoronó"
+
+En un mundo donde la perfección era el estándar, la familia Smith parecía tenerlo todo bajo control. El padre, Mark, era un exitoso empresario con una casa lujosa en las afueras de la ciudad y dos hijos adolescentes, Emma y Jack, que siempre destacaban por sus logros académicos y deportivos.
+
+Pero detrás del telón de la perfección, se escondían secretos que pronto se convertirían en un desastre. Mark, el padre, llevaba años engañando a su esposa, Sarah, con una joven empleada de su empresa, Emily. La relación era secreta, pero su deseo por ella crecía cada día.
+
+Sarah, la madre, estaba ocupada cuidando de los hijos y manejando las finanzas del hogar, sin sospechar lo que pasaba detrás de sus espaldas. Emma, la hija mayor, había estado notando cambios en su padre desde hacía meses, pero no había querido creer que algo estuviera mal.
+
+Jack, el hijo menor, era un chico callado y introvertido que siempre se había sentido invisible ante los ojos de sus padres. Tenía un secreto propio: estaba enamorado de su amiga de la escuela, Olivia, pero no se atrevía a confesarle sus sentimientos.
+
+Mientras tanto, Emily empezó a sentirse cada vez más incómoda con la situación. Sabía que Mark no era feliz en su matrimonio y que necesitaba ayuda para terminarlo, pero también sabía que sería difícil para él romper las cadenas de su familia perfecta.
+
+El clímax llegó un día cuando Mark fue sorprendido por Sarah mientras se encontraba con Emily. La relación salió a la luz y causó un desastre en la familia Smith. Emma, quien había estado investigando a Emily después de sospechar algo, descubrió que su padre había estado engañando a su madre durante años.
+
+La noticia causó una fuerte reacción en Jack, quien siempre se sintió culpable por ser el hijo menos querido. Olivia, la chica con la cual estaba enamorado, lo abrazó y lo escuchó sin juzgarlo. Para Jack, eso fue todo lo que necesitaba para saber que no estaba solo.
+
+El drama no terminó ahí. Mark decidió divorciarse de Sarah y quedarse con Emily, pero pronto se dieron cuenta de que su relación no funcionaría en la realidad como lo había soñado en el secreto. Su deseo por la perfección había sido su caída en picada.
+
+El final de la historia es una reflexión sobre las consecuencias de las mentiras y la búsqueda de la perfección. La familia Smith se dio cuenta de que su deseo de apariencia exterior les llevó a descuidar la felicidad real, la confianza mutua y el amor genuino."
+
+```

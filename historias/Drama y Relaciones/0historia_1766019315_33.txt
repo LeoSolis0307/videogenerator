@@ -1,0 +1,57 @@
+```json
+{
+  "historia": "La lluvia de ayer"
+
+  Era una de esas noches que te quedan grabadas a fuego en la memoria como un recuerdo que no puedes olvidar, una noche en la que el cielo se rasgó y la lluvia llovió con todas sus fuerzas. Recuerdo que estaba sentado en el porche de mi casa, escuchando el sonido del agua golpeando contra el suelo como un martillo insistente.
+
+  De repente, oí un grito detrás de mí y me volví para ver a Sofía, la mujer con quien había estado saliendo durante unos meses, corriendo hacia mí con una mirada desesperada en los ojos. La lluvia no parecía importarle; avanzaba como si estuviera huyendo de algo.
+
+  "¿Qué pasa?", le pregunté mientras ella se detenía frente a mí, respirando agitadamente.
+
+  No me contestó inmediatamente. Se quedó allí plantada, mirándome con una expresión que no logré entender. Tenía los ojos rojos y llorosos, pero eso era lo único que podía leer en su cara.
+
+  Me levanté y la tomé de las manos. "Sofía, ¿qué pasa?", insistí, sintiendo cómo el temblor de sus dedos me transmitía una sensación de ansiedad.
+
+  No fue hasta que la miré directamente a los ojos que empezó a hablar. Sus palabras salieron entrecortadas y con un tono lento, como si estuviera reuniendo fuerzas para decir lo que quería decir.
+
+  "Necesito hablar contigo", dijo finalmente. "Necesito saber que sientes al respecto". La miré confundido. No sabía de qué estaba hablando.
+
+  Y entonces me explicó, con un tono triste y desesperado. "Lo de ayer... lo que le dije a mi hermana... fue una mentira", dijo finalmente. Había algo en su voz que me hizo sentir inquieto, como si se tratara de algo más grave de lo que parecía.
+
+  Me quedé sin palabras. No sabía qué decir o hacer. La situación era incómoda y me sentí incómodo al respecto.
+
+  Intenté entenderla, pero ella se encogió de hombros y dijo simplemente: "No importa". Se soltó de mis manos y miró hacia la lluvia como si estuviera tratando de encontrar respuestas en el agua.
+
+  Me quedé allí plantado, sintiendo que estaba perdiendo a alguien que había empezado a querer. La noche no parecía importarle; avanzaba con una determinación que me dejó sin palabras.
+
+  Miré hacia ella y vi cómo la lluvia caía sobre su cara, reflejándose en sus ojos como un espejo de lágrimas.
+
+  Me quedé allí durante unos minutos más, sintiendo el peso de su silencio. La lluvia no cesaba; simplemente seguía cayendo con la misma fuerza que antes. Y Sofía... simplemente se quedó allí plantada, reflejando en sus ojos un dolor que me dejó sin palabras.
+
+  Al final, fue ella quien rompió el silencio, diciendo de repente: "Creo que debería irme". Me sorprendió y no sabía qué responder. No quería que se fuera; quería saber qué pasaba y quería ayudarla.
+
+  Pero era una situación difícil y complicada. No podía entender por qué había mentido a su hermana y no quería presionarla para que me explicara.
+
+  La miré, sintiendo que estaba perdiendo a alguien importante. Miré hacia la lluvia y luego de nuevo a Sofía, sintiendo que necesitaba encontrar una forma de ayudarla antes de que fuera demasiado tarde.
+
+  Finalmente dijo: "Espero que entiendas". Y me miró con ojos rojos y llorosos, como si estuviera tratando de decirme algo más sin hablarlo. 
+
+  Yo no entendí entonces, pero recuerdo la expresión en su cara cuando se fue bajo la lluvia. Recuerdo cómo sentí una sensación de pérdida y vacío al verla marchar.
+
+  Al día siguiente, la llamé a casa para saber si estaba bien y qué había pasado con su hermana. Pero no me contestó el teléfono.
+
+  Durante días, no pude hablar con ella. No pude entender por qué había mentido o qué pasaba exactamente. Me sentí vacío y confundido al respecto.
+
+  Recuerdo que un día fui a visitarla a su casa y la encontré sentada en el sofá, mirando hacia la pared sin hacer nada. Se levantó para abrirme la puerta con una sonrisa forzada en su cara.
+
+  "Hola", dijo finalmente, como si no supiera qué decir o hacer al respecto. Me dio un abrazo corto y se apartó de mí para mirarme directamente a los ojos, con una mirada que me hizo sentir incómodo.
+
+  En ese momento, entendí que estaba sufriendo algo más profundo que simplemente mentirle a su hermana. Era como si estuviera perdiendo algo valioso y no supiera cómo recuperarlo.
+
+  Me quedé allí plantado durante unos minutos, sintiendo el peso de su silencio. Quería ayudarla, pero no sabía qué decir o hacer al respecto.
+
+  Al final, fue ella quien rompió el silencio, diciendo de repente: "Gracias por venir". Me miró directamente a los ojos con una sonrisa forzada en su cara y luego se despidió rápidamente para ir a su habitación.
+
+  Me quedé allí plantado durante unos minutos más, sintiendo el peso de su silencio. La casa parecía vacía y triste después que ella se hubo ido."
+
+}

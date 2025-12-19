@@ -1,0 +1,24 @@
+```json
+{
+  "historia": "
+
+La noche de invierno se arrastraba como un lento funeral sobre la ciudad. Las luces de los edificios parecían apagadas, y solo el ruido de la lluvia contra las ventanas rompía la quietud. En una de esas casas, en lo alto de una colina que parecía mirar con desdén a los demás barrios, vivía Ana García, una mujer de unos 30 años que había construido su vida sobre la perfección.
+
+Su marido, Carlos, era un exitoso empresario de 35, con un rostro de ángel y ojos que parecían querer atrapar el alma de quien lo mirara. Juntos habían creado una familia perfecta: dos hijos pequeños, un hermoso hogar en la ladera de una colina, y un círculo de amigos que admiraban su felicidad. Pero nada es tan fácil como parece.
+
+Ana trabajaba desde casa como asistente virtual para una empresa de publicidad, y aunque le gustaba el trabajo, sentía que estaba perdiendo su identidad en la rutina diaria. Carlos, por otro lado, era un hombre ocupado, siempre en viajes de negocios o reuniones con clientes. A pesar de todo, cuando estaban juntos, su amor parecía encender una llama que iluminaba el mundo.
+
+Sin embargo, en ese invierno, comenzaron a surgir señales de un cambio en la dinámica de su relación. Ana empezó a notar pequeños detalles: Carlos se retrasaba cada vez más para cenar con ella y los niños; siempre llegaba cansado y se dormía en el sofá al rato; y cuando hablaban, su mirada parecía estar más allá de ella.
+
+Al principio pensó que era solo estrés del trabajo o un momento difícil en la empresa. Pero pronto descubrió cartas y mensajes de una mujer llamada Sofía en el bolso de Carlos. El nombre le sonaba familiar, pero Ana no sabía quién era hasta que un día, mientras pasaba por el parque donde solían caminar los domingos con los niños, vio a una mujer rubia y alta con la misma cara de felicidad ilimitada que su marido.
+
+Aunque inicialmente se sintió vacía e indigna, Ana decidió no confrontar a Carlos directamente. Quería saber quién era esta Sofía para entender el porqué de las miradas ausentes del esposo. Comenzó a seguirlo discretamente, concurriendo a los lugares que sabía visitaba solo para observarlo de lejos.
+
+Un día descubrió la verdad. Carlos y Sofía se encontraban en un restaurante elegante, riendo y tocándose como si fueran recién casados. La ira comenzó a crecer dentro de Ana, pero se detuvo justo antes de explotar. No quería perder el control ni enfrentarse directamente al dolor que sentía.
+
+La decisión de confrontar la verdad tomó tiempo, pero finalmente llegó un día en que ya no pudo más con los celos y la rabia acumulada. Con los niños durmiendo y una sonrisa falsa pintada en su rostro, se dirigió a Carlos en el momento que menos lo esperaba: cuando estaba llegando a casa del trabajo.
+
+¿Qué debía hacer Ana para recuperar la relación o qué decisiones tomarían cada uno de ellos hacia un fin incierto? Solo el futuro lo sabría."
+
+}
+```

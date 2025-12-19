@@ -1,7 +1,7 @@
 import hashlib
 import os
 
-from core import image_downloader, reddit_scraper, text_processor, tts
+from core import image_downloader, reddit_scraper, story_generator, text_processor, tts
 from core.video_renderer import (
  append_intro_to_video,
  audio_duration_seconds,
@@ -18,6 +18,14 @@ from utils.fs import crear_carpeta_proyecto, guardar_historial
                                                       
 VOZ = r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech\Voices\Tokens\TTS_MS_ES-MX_SABINA_11.0"
 VELOCIDAD = "-17%"
+
+HISTORIAS_BASE = "historias"
+HISTORIAS_GENEROS = {
+ "1": "Drama y Relaciones",
+ "2": "Terror y Paranormal",
+ "3": "Venganza y Karens",
+ "4": "Preguntas y Curiosidades",
+}
 
 
 def _pedir_entero(mensaje: str, *, minimo: int = 1, default: int = 1) -> int:
@@ -77,7 +85,54 @@ def _filtrar_comentarios(comentarios, limite=200):
 	return filtrados
 
 
-def _generar_video(usar_video_base: bool, indice: int, total: int) -> bool:
+def _leer_historias_locales(carpeta_genero: str):
+	os.makedirs(carpeta_genero, exist_ok=True)
+	historias = []
+	for nombre in sorted(os.listdir(carpeta_genero)):
+		if nombre.startswith("0"):
+			continue            
+		if not nombre.lower().endswith(".txt"):
+			continue
+		ruta = os.path.join(carpeta_genero, nombre)
+		try:
+			with open(ruta, "r", encoding="utf-8") as f:
+				texto = f.read().strip()
+			if texto:
+				historias.append((texto, ruta))
+		except Exception as e:
+			print(f"[MAIN] ⚠️ No se pudo leer {ruta}: {e}")
+	return historias
+
+
+def _marcar_historias_usadas(rutas):
+	for ruta in rutas:
+		try:
+			base = os.path.basename(ruta)
+			dirname = os.path.dirname(ruta)
+			if base.startswith("0"):
+				continue
+			nuevo = os.path.join(dirname, "0" + base)
+                                                     
+			while os.path.exists(nuevo):
+				nuevo = os.path.join(dirname, "0" + os.path.basename(nuevo))
+			os.rename(ruta, nuevo)
+		except Exception as e:
+			print(f"[MAIN] ⚠️ No se pudo marcar historia como usada ({ruta}): {e}")
+
+
+def _seleccionar_genero() -> str:
+	print("Elige género:")
+	for clave, nombre in HISTORIAS_GENEROS.items():
+		print(f"  {clave}. {nombre}")
+	seleccion = input("Opción: ").strip()
+	genero = HISTORIAS_GENEROS.get(seleccion, HISTORIAS_GENEROS["1"])
+                                                                                             
+	for nombre in HISTORIAS_GENEROS.values():
+		os.makedirs(os.path.join(HISTORIAS_BASE, nombre), exist_ok=True)
+	return genero
+
+
+def _generar_video(usar_video_base: bool, indice: int, total: int, *, usar_historias_locales: bool, carpeta_genero: str | None) -> bool:
 	print(f"[MAIN] ===== Video {indice}/{total} =====")
 
 	carpeta = crear_carpeta_proyecto()
@@ -94,13 +149,22 @@ def _generar_video(usar_video_base: bool, indice: int, total: int) -> bool:
 			return False
 		print(f"[MAIN] Video base seleccionado: {video_base_path} (~{video_base_dur:.1f}s)")
 
-	post = reddit_scraper.obtener_post()
-	if not post:
-		print("[MAIN] No se pudo obtener post")
-		return False
+	if usar_historias_locales:
+		if not carpeta_genero:
+			print("[MAIN] No se especificó carpeta de historias")
+			return False
+		comentarios_filtrados = _leer_historias_locales(carpeta_genero)
+		if not comentarios_filtrados:
+			print(f"[MAIN] No se encontraron historias en {carpeta_genero}")
+			return False
+	else:
+		post = reddit_scraper.obtener_post()
+		if not post:
+			print("[MAIN] No se pudo obtener post")
+			return False
 
-	comentarios = reddit_scraper.obtener_comentarios(post["permalink"])
-	comentarios_filtrados = _filtrar_comentarios(comentarios, limite=200)
+		comentarios = reddit_scraper.obtener_comentarios(post["permalink"])
+		comentarios_filtrados = _filtrar_comentarios(comentarios, limite=200)
 
 	if usar_video_base and video_base_dur > 0:
 		gap = 4.0
@@ -193,6 +257,9 @@ def _generar_video(usar_video_base: bool, indice: int, total: int) -> bool:
 	textos_en = [txt for (txt, _cid) in comentarios_filtrados]
 	ids_seleccionados = [cid for (_txt, cid) in comentarios_filtrados]
 
+	if usar_historias_locales:
+		_marcar_historias_usadas(ids_seleccionados)
+
 	if not textos_en:
 		print("[MAIN] No hay textos suficientes")
 		return False
@@ -284,15 +351,9 @@ def _generar_video(usar_video_base: bool, indice: int, total: int) -> bool:
 			print(f"[MAIN] Error renderizando con video base: {e}")
 			return False
 	else:
-		audio_final = combine_audios_with_silence(
-		 audios,
-		 carpeta,
-		 gap_seconds=4,
-		 min_seconds=None,
-		 max_seconds=120,                                              
-		)
+		audio_final = combine_audios_with_silence(audios, carpeta, gap_seconds=4)
 
-		imagenes = image_downloader.descargar_imagenes(carpeta, 1)                                              
+		imagenes = image_downloader.descargar_imagenes(carpeta, 10)
 
 		if not imagenes:
 			print("[MAIN] No se descargaron imágenes")
@@ -326,14 +387,36 @@ def _generar_video(usar_video_base: bool, indice: int, total: int) -> bool:
 
 if __name__ == "__main__":
 	print("[MAIN] Iniciando proceso")
+	accion = input("¿Qué deseas hacer? (1 = Videos, 2 = Textos): ").strip()
+
+	if accion == "2":
+		total_textos = _pedir_entero("¿Cuántas historias generar?: ", minimo=1, default=1)
+		genero = _seleccionar_genero()
+		try:
+			resultados = story_generator.generar_historias(genero, total_textos)
+			print(f"[MAIN] Historias generadas: {len(resultados)}/{total_textos}")
+		except Exception as e:
+			print(f"[MAIN] ⚠️ Error generando historias: {e}")
+		raise SystemExit(0)
+
+                 
 	total_videos = _pedir_entero("¿Cuántos videos generar en esta ejecución? (número entero): ", minimo=1, default=1)
 	modo = input("Selecciona modo (1 = IA/imagenes, 2 = Video base): ").strip()
 	usar_video_base = modo == "2"
 
+	origen = input("Origen de historias (1 = Reddit automático, 2 = Carpeta 'historias'): ").strip()
+	usar_historias_locales = origen == "2"
+	carpeta_genero = None
+
+	if usar_historias_locales:
+		genero = _seleccionar_genero()
+		carpeta_genero = os.path.join(HISTORIAS_BASE, genero)
+		print(f"[MAIN] Usando historias locales desde: {carpeta_genero}")
+
 	exitos = 0
 	for i in range(total_videos):
 		try:
-			if _generar_video(usar_video_base, i + 1, total_videos):
+			if _generar_video(usar_video_base, i + 1, total_videos, usar_historias_locales=usar_historias_locales, carpeta_genero=carpeta_genero):
 				exitos += 1
 		except Exception as e:
 			print(f"[MAIN] ⚠️ Error inesperado en video {i+1}/{total_videos}: {e}")
