@@ -266,12 +266,11 @@ def generar_historias(genero: str, cantidad: int) -> List[Tuple[str, str]]:
                 print(f"[GPT] Historia rechazada: {reason} -> inventando detalles")
                 texto = _generar_historia_genero(genero, inventar=True)
                 h = _hash_text(texto)
-                ok_fallback, reason_fallback = _validar_historia(texto)
-                if ok_fallback:
-                    ok, reason = True, reason_fallback
-                else:
-                                                                         
-                    ok, reason = True, "forzada tras inventar"
+                ok2, reason2 = _validar_historia(texto)
+                if not ok2:
+                    print(f"[GPT] Historia rechazada nuevamente: {reason2} -> reintentando...")
+                    continue
+                ok, reason = True, reason2
 
             ruta = _guardar_historia(texto, genero, i)
             data.setdefault("items", []).append({
@@ -282,7 +281,7 @@ def generar_historias(genero: str, cantidad: int) -> List[Tuple[str, str]]:
             })
             hashes.add(h)
             aceptadas.append((ruta, h))
-            print(f"[GPT] ✅ Historia guardada en {ruta}")
+            print(f"[GPT] ✅ Historia {i + 1}/{cantidad} guardada en {ruta}")
             break
         else:
             print(f"[GPT] ❌ No se pudo generar historia única para el índice {i}")

@@ -15,6 +15,6 @@ def traducir_lista(textos):
             traducidos.append(es)
         except Exception as e:
             print(f"[TEXT] Error traduciendo: {e}")
-            traducidos.append(texto)            
+            raise RuntimeError(f"Fallo traduciendo item {i+1}/{len(textos)}") from e
 
     return traducidos

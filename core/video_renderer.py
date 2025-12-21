@@ -5,6 +5,7 @@ import random
 import re
 import subprocess
 import wave
+import shutil
 
 import imageio_ffmpeg
 
@@ -13,6 +14,28 @@ MIN_VIDEO_SEC = 15 * 60
 MAX_VIDEO_SEC = 30 * 60
 DEFAULT_VIDEOS_DIR = r"C:\Users\Leonardo\Downloads\video\media"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+
+
+def _pick_ffmpeg() -> str:
+    env_bin = os.environ.get("FFMPEG_BIN")
+    if env_bin:
+        if os.path.exists(env_bin):
+            return env_bin
+        else:
+            print(f"[VIDEO] FFMPEG_BIN no existe, ignorando: {env_bin}")
+
+    local_bin = os.path.join(os.path.dirname(imageio_ffmpeg.__file__), "binaries", "ffmpeg-win-x86_64-v7.1.exe")
+
+                                                                                        
+    if os.path.exists(local_bin):
+        os.environ["FFMPEG_BIN"] = local_bin
+        print(f"[VIDEO] ffmpeg (paquete) seleccionado: {local_bin}")
+        return local_bin
+
+    raise FileNotFoundError(
+        "No se encontró ffmpeg empaquetado (imageio_ffmpeg). "
+        "Instala/rehaz el entorno o define FFMPEG_BIN apuntando a un exe válido."
+    )
 
 
 def _ffmpeg_path(path: str) -> str:
@@ -62,9 +85,9 @@ def _audio_duration_seconds(path: str) -> float:
             return ""
 
     try:
-        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_bin = _pick_ffmpeg()
     except Exception:
-        ffmpeg_bin = "ffmpeg"
+        raise
 
     ffprobe_guess = ffmpeg_bin.replace("ffmpeg", "ffprobe")
 
@@ -115,7 +138,7 @@ def _debug_dump_duration(path: str):
     \
     print(f"[VIDEO-DEBUG] Dump de duración para: {path}")
     try:
-        ffmpeg_bin = imageio_ffmpeg.get_ffmpeg_exe()
+        ffmpeg_bin = _pick_ffmpeg()
         ffprobe_guess = ffmpeg_bin.replace("ffmpeg", "ffprobe")
     except Exception as e:
         ffmpeg_bin = "ffmpeg"
@@ -220,7 +243,7 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
 \
 \
 \
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = _pick_ffmpeg()
 
     video_fs = video_path or _pick_video_file(videos_dir)
     if not video_fs:
@@ -304,7 +327,7 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
 
 
 def _normalize_audio_to_wav(src: str, dst: str, *, rate: int = 48000, channels: int = 1) -> str:
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = _pick_ffmpeg()
     cmd = [
         ffmpeg,
         "-y",
@@ -393,7 +416,7 @@ def combine_audios_with_silence(audios, carpeta, gap_seconds=4, *, min_seconds: 
                 pass
 
 
-def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None):
+def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=None):
     print("[VIDEO] Preparando render con FFmpeg (imageio)...")
 
     if not imagenes:
@@ -402,11 +425,10 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None):
     if not carpeta:
         raise ValueError("[VIDEO] Carpeta de salida no válida")
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = _pick_ffmpeg()
     print(f"[VIDEO] FFmpeg encontrado en: {ffmpeg}")
 
     carpeta_abs = os.path.abspath(carpeta)
-    img_list = os.path.join(carpeta_abs, "imgs.txt")
     audio_abs = os.path.abspath(audio)
 
     if not os.path.exists(audio_abs):
@@ -416,37 +438,79 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None):
         if not os.path.exists(img):
             raise FileNotFoundError(f"[VIDEO] No se encontró la imagen: {img}")
 
-    if tiempo_img is None:
-        dur_audio = max(1.0, _audio_duration_seconds(audio))
+    dur_list = list(durations or [])
+    if dur_list and len(dur_list) < len(imagenes):
+        dur_list.extend([dur_list[-1]] * (len(imagenes) - len(dur_list)))
+
+    if tiempo_img is None and not dur_list:
+        dur_audio = max(1.0, _audio_duration_seconds(audio_abs))
         tiempo_img = max(1, math.ceil(dur_audio / len(imagenes)))
 
-    with open(img_list, "w", encoding="utf-8") as f:
-        for img in imagenes:
-            img_norm = _ffmpeg_path(img)
-            f.write(f"file '{img_norm}'\n")
-            f.write(f"duration {tiempo_img}\n")
+                                                                                          
+                                                                                                         
+    inputs: list[str] = [ffmpeg, "-y"]
+    filter_parts: list[str] = []
+    vlabels: list[str] = []
 
-                                                               
-        f.write(f"file '{_ffmpeg_path(imagenes[-1])}'\n")
+    for idx, img in enumerate(imagenes):
+        dur_val = max(0.5, float(dur_list[idx])) if dur_list else max(0.5, float(tiempo_img))
+        inputs.extend(["-loop", "1", "-t", str(dur_val), "-i", _ffmpeg_path(img)])
+
+        vlabel = f"v{idx}"
+        vlabels.append(f"[{vlabel}]")
+        filter_parts.append(
+            f"[{idx}:v]fps=25,scale=768:768:force_original_aspect_ratio=decrease,"
+            f"pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[{vlabel}]"
+        )
+
+                             
+    audio_input_index = len(imagenes)
+    inputs.extend(["-i", _ffmpeg_path(audio_abs)])
+
+    n = len(imagenes)
+    concat_in = "".join(vlabels)
+    filter_complex = ";".join(filter_parts) + f";{concat_in}concat=n={n}:v=1:a=0[v]"
 
     salida = os.path.join(carpeta_abs, "Video_Final.mp4")
 
-    cmd = [
-        ffmpeg, "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", img_list,
-        "-i", audio_abs,
-        "-vf",
-        "fps=25,scale=768:768:force_original_aspect_ratio=decrease,pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1",
-        "-c:v", "h264",                                         
-        "-pix_fmt", "yuv420p",
-        "-shortest",
-        salida
-    ]
+    cmd = (
+        inputs
+        + [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            f"{audio_input_index}:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "20",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "25",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            _ffmpeg_path(salida),
+        ]
+    )
 
     print("[VIDEO] Ejecutando FFmpeg...")
-    subprocess.run(cmd, check=True)
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    if res.returncode != 0:
+        out = (res.stdout or "")[:4000]
+        err = (res.stderr or "")[:4000]
+        if out:
+            print(f"[VIDEO] ffmpeg stdout:\n{out}")
+        if err:
+            print(f"[VIDEO] ffmpeg stderr:\n{err}")
+        res.check_returncode()
 
     print(f"[VIDEO] ✅ Video renderizado: {salida}")
     return salida
@@ -480,7 +544,7 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
     if not os.path.exists(intro_fs):
         raise FileNotFoundError(f"[VIDEO] No se encontró el intro: {intro_fs}")
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = _pick_ffmpeg()
     base, ext = os.path.splitext(os.path.basename(video_fs))
     carpeta_salida = os.path.dirname(video_fs)
     nombre_final = _slugify_title(title_text) if title_text else base + "_con_intro"
@@ -507,7 +571,9 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "[a]",
-        "-c:v", "h264",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-movflags", "+faststart",
@@ -527,7 +593,7 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"[CLIP] Imagen no encontrada: {image_path}")
 
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = _pick_ffmpeg()
     os.makedirs(carpeta_salida, exist_ok=True)
 
     nombre = _slugify_title(title_text) if title_text else "clip"
@@ -547,7 +613,9 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
         "-filter_complex", filter_complex,
         "-map", "[v0]",
         "-map", "1:a",
-        "-c:v", "h264",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-shortest",

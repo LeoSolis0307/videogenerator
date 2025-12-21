@@ -161,7 +161,7 @@ def _render_wav_subprocess(*, texto: str, ruta_wav: str, voz_id: str | None, rat
             pass
 
 
-def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None, *, permitir_fallback: bool):
+def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None):
     \
 \
 \
@@ -216,11 +216,6 @@ def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None, *, permitir_fal
         elegido = candidatos[0][1]
         engine.setProperty("voice", elegido.id)
         return getattr(elegido, "name", None), elegido.id
-
-                                       
-    if permitir_fallback:
-        engine.setProperty("voice", voces[0].id)
-        return getattr(voces[0], "name", None), voces[0].id
 
     return None, None
 
