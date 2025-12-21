@@ -890,6 +890,7 @@ def _seleccionar_candidatos_interactivo(
         print("  5) Abrir audio del segmento")
         print("  6) Atrás (segmento anterior)")
         print("  7) Salir y renderizar")
+        print("  8) Abrir TODOS los candidatos + audio")
 
         opt = input("> ").strip()
 
@@ -915,6 +916,28 @@ def _seleccionar_candidatos_interactivo(
                 _open_file_default(ap)
             else:
                 print("[CUSTOM] No hay audio para abrir.")
+            continue
+        if opt == "8":
+                                                                         
+            ap = audio_path
+            if ap and os.path.exists(ap):
+                _open_file_default(ap)
+            else:
+                print("[CUSTOM] No hay audio para abrir.")
+
+            opened = 0
+            for c in cands:
+                if not isinstance(c, dict):
+                    continue
+                relp = str(c.get("path") or "").strip()
+                if not relp:
+                    continue
+                absp = os.path.join(carpeta, relp.replace("/", os.sep))
+                if not os.path.exists(absp):
+                    continue
+                _open_file_default(absp)
+                opened += 1
+            print(f"[CUSTOM] Abiertos {opened} candidatos.")
             continue
         if opt == "3":
             kraw = input("Número de candidato a ver: ").strip()
