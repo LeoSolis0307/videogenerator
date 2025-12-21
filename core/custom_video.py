@@ -12,25 +12,25 @@ import time
 import base64
 from urllib.parse import urlparse
 
-# DDG cliente: preferir paquete renombrado 'ddgs', si no, usar duckduckgo_search
-try:  # nuevo paquete
+                                                                                
+try:                 
     from ddgs import DDGS as DDGS
     _DDG_BACKEND = "ddgs"
 except Exception:
-    try:  # legacy paquete
+    try:                  
         from duckduckgo_search import DDGS as DDGS
         _DDG_BACKEND = "duckduckgo_search"
     except Exception:
         DDGS = None
         _DDG_BACKEND = None
 
-# Cache para saber si moondream via ollama está disponible; None = sin probar
+                                                                             
 _MOONDREAM_AVAILABLE: bool | None = None
 _DEBUG_IMG_VALIDATION = (os.environ.get("DEBUG_IMG_VALIDATION") or "").strip() in {"1", "true", "True", "YES", "yes"}
 
 import requests
 
-# Permite ejecutar como script standalone (ajusta sys.path si no hay paquete parent)
+                                                                                    
 if __name__ == "__main__" and __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
@@ -44,19 +44,19 @@ from core.video_renderer import (
 from utils.fs import crear_carpeta_proyecto
 
 
-# Config LLM (llama3.1 en Ollama)
+                                 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip()
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1").strip() or "llama3.1"
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
 
 
 def _ollama_host() -> str:
-    """Devuelve el host base de Ollama (ej: http://localhost:11434).
-
-    Soporta dos configuraciones:
-    - OLLAMA_HOST=http://localhost:11434
-    - OLLAMA_URL=http://localhost:11434/api/generate (legacy en este proyecto)
-    """
+    \
+\
+\
+\
+\
+\
     host = (os.environ.get("OLLAMA_HOST") or "").strip()
     if host:
         return host.rstrip("/")
@@ -65,29 +65,29 @@ def _ollama_host() -> str:
     if not raw:
         return "http://localhost:11434"
 
-    # Si viene como /api/generate, extraemos scheme://netloc
+                                                            
     try:
         p = urlparse(raw)
         if p.scheme and p.netloc:
             return f"{p.scheme}://{p.netloc}".rstrip("/")
     except Exception:
         pass
-    # Compatibilidad con OLLAMA_URL apuntando a /api/*
+                                                      
     return raw.split("/api/")[0].rstrip("/")
 
 
 def _ollama_api_url(path: str) -> str:
     return _ollama_host().rstrip("/") + "/" + path.lstrip("/")
 
-# Descarga de imágenes web (Wikimedia Commons)
+                                              
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
-# Duración mínima por defecto para video personalizado (segundos)
-# El flujo interactivo permite elegir 60s o 300s; este valor es el default.
+                                                                 
+                                                                           
 DEFAULT_CUSTOM_MIN_VIDEO_SEC = int(os.environ.get("CUSTOM_MIN_VIDEO_SEC", "60") or "60")
 
-# Puntaje mínimo aceptable para seleccionar una imagen (1-5). Default 1 para no bloquear.
+                                                                                         
 MIN_IMG_SCORE = int(os.environ.get("CUSTOM_MIN_IMG_SCORE", "1") or "1")
 
 
@@ -102,10 +102,10 @@ def _estimar_segundos(texto: str) -> float:
 
 
 def _extract_json_object(raw: str) -> Dict[str, Any]:
-    """Intenta extraer un objeto JSON válido de una respuesta de LLM.
-
-    Maneja casos comunes: texto extra alrededor, markdown fences, etc.
-    """
+    \
+\
+\
+\
     obj = _extract_json_value(raw)
     if isinstance(obj, dict):
         return obj
@@ -113,7 +113,7 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
 
 
 def _extract_json_value(raw: str) -> Any:
-    """Extrae un valor JSON (dict o list) tolerando fences y texto extra."""
+    \
     raw = (raw or "").strip()
     if not raw:
         raise ValueError("Respuesta vacía del LLM")
@@ -123,13 +123,13 @@ def _extract_json_value(raw: str) -> Any:
     if not raw:
         raise ValueError("Respuesta vacía del LLM (tras remover markdown)")
 
-    # Directo
+             
     try:
         return json.loads(raw)
     except Exception:
         pass
 
-    # Intento: primer objeto { ... }
+                                    
     o_s = raw.find("{")
     o_e = raw.rfind("}")
     if o_s != -1 and o_e != -1 and o_e > o_s:
@@ -139,7 +139,7 @@ def _extract_json_value(raw: str) -> Any:
         except Exception:
             pass
 
-    # Intento: primer array [ ... ]
+                                   
     a_s = raw.find("[")
     a_e = raw.rfind("]")
     if a_s != -1 and a_e != -1 and a_e > a_s:
@@ -157,12 +157,12 @@ def _extract_json_array(raw: str) -> List[Any]:
 
 
 def _sanitize_brief_for_duration(brief: str) -> str:
-    """Remueve pistas de 'Shorts/60s' para no sesgar al modelo contra el mínimo 5 min."""
+    \
     b = (brief or "").strip()
     if not b:
         return ""
 
-    # Quitar menciones explícitas comunes
+                                         
     b = re.sub(r"\b(shorts?|yt\s*shorts?)\b", "", b, flags=re.IGNORECASE)
     b = re.sub(r"\b\d{1,4}\s*(segundos|segundo|s)\b", "", b, flags=re.IGNORECASE)
     b = re.sub(r"\b\d{1,3}\s*(minutos|minuto|min)\b", "", b, flags=re.IGNORECASE)
@@ -209,12 +209,12 @@ def _es_cierre_valido(texto: str) -> bool:
     t = (texto or "").lower()
     if not t.strip():
         return False
-    # Evitar cierres incompletos.
+                                 
     if t.strip().endswith("..."):
         return False
     if "¿sabías que..." in t or "sabías que..." in t or "sabias que..." in t:
         return False
-    # Debe cerrar con un dato curioso/impactante, no con una frase vaga.
+                                                                        
     buenas = [
         "dato curioso",
         "dato final",
@@ -241,7 +241,7 @@ def _es_cierre_valido(texto: str) -> bool:
 def _prompt_rewrite_closing_segment(brief: str, contexto: str, last_segment: Dict[str, Any], *, target_seconds: int) -> str:
     contexto_line = contexto if contexto else "Sin contexto web disponible."
     last_json = json.dumps(last_segment or {}, ensure_ascii=False)[:1500]
-    # Para shorts: 25-60 palabras; para largo: 70-140 palabras.
+                                                               
     if int(target_seconds) >= 300:
         wmin, wmax = 70, 140
     else:
@@ -262,14 +262,14 @@ def _prompt_rewrite_closing_segment(brief: str, contexto: str, last_segment: Dic
 
 
 def _infer_target_seconds_from_brief(brief: str) -> int:
-    """Compat: duración viene del input del usuario; el brief no manda."""
+    \
     _ = brief
     return int(DEFAULT_CUSTOM_MIN_VIDEO_SEC)
 
 
 def _target_word_range(min_seconds: int) -> tuple[int, int]:
-    """Rango de palabras recomendado para cumplir duración (aprox)."""
-    # Base ~140 wpm y un colchón para pausas/entonación.
+\
+                                                        
     sec = max(30, int(min_seconds))
     base = int(140 * (sec / 60.0))
     return max(90, int(base * 0.95)), max(120, int(base * 1.35))
@@ -336,7 +336,7 @@ def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int 
 
 
 def _ollama_generate_with_timeout(prompt: str, *, temperature: float, max_tokens: int, timeout_sec: int) -> str:
-    """Igual que _ollama_generate pero con timeout configurable por llamada."""
+    \
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -363,7 +363,7 @@ def _ollama_generate_json(prompt: str, *, temperature: float = 0.65, max_tokens:
 def _ollama_generate_json_with_timeout(prompt: str, *, temperature: float, max_tokens: int, timeout_sec: int) -> Dict[str, Any]:
     def _prompt_fix_invalid_json(bad_raw: str, err: Exception) -> str:
         bad = (bad_raw or "").strip()
-        # Evitar prompts enormes
+                                
         if len(bad) > 8000:
             bad = bad[:8000]
         return (
@@ -378,7 +378,7 @@ def _ollama_generate_json_with_timeout(prompt: str, *, temperature: float, max_t
     last_err: Exception | None = None
     raw_last = ""
 
-    # 1) Generación inicial
+                           
     for attempt in range(2):
         try:
             raw_last = _ollama_generate_with_timeout(
@@ -390,10 +390,10 @@ def _ollama_generate_json_with_timeout(prompt: str, *, temperature: float, max_t
             return _extract_json_object(raw_last)
         except Exception as e:
             last_err = e
-            # Segundo intento: cambia levemente temperatura para destrabar salidas vacías o texto no-JSON.
+                                                                                                          
             temperature = min(0.8, max(0.2, temperature + 0.05))
 
-    # 2) Si hubo salida pero fue JSON inválido, pedir corrección del mismo JSON
+                                                                               
     if raw_last:
         for _ in range(2):
             try:
@@ -460,7 +460,7 @@ def _wikimedia_image_url(query: str) -> str | None:
         url = entry.get("responsiveUrls", {}).get("1600") or entry.get("url")
         if not url:
             continue
-        # Solo aceptar imágenes reales, no PDF u otros mimetypes.
+                                                                 
         if mime and not mime.lower().startswith("image/"):
             continue
         if any(url.lower().endswith(ext) for ext in (".pdf", ".svg", ".djvu")):
@@ -498,7 +498,7 @@ def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
     try:
         with open(path, "wb") as f:
             f.write(resp.content)
-        # Detectar formato real (a veces el URL no coincide con el mimetype real)
+                                                                                 
         real_fmt = imghdr.what(path)
         if real_fmt == "jpeg":
             real_ext = "jpg"
@@ -513,7 +513,7 @@ def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
             except Exception:
                 pass
 
-        # Validar imagen para evitar archivos corruptos que rompan ffmpeg.
+                                                                          
         if not _es_imagen_valida(path):
             try:
                 os.remove(path)
@@ -528,7 +528,7 @@ def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
 
 
 def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
-    """Descarga una imagen a un path específico y valida que sea decodificable."""
+    \
     headers = {"User-Agent": USER_AGENT}
     try:
         resp = requests.get(url, headers={**headers, "Accept": "image/*,*/*;q=0.8"}, timeout=30)
@@ -584,12 +584,12 @@ def _es_imagen_valida(path: str) -> bool:
     try:
         if not os.path.exists(path):
             return False
-        if os.path.getsize(path) < 1024:  # demasiado pequeña; probable error
+        if os.path.getsize(path) < 1024:                                     
             return False
         if not imghdr.what(path):
             return False
         try:
-            from PIL import Image  # opcional si está instalado
+            from PIL import Image                              
 
             with Image.open(path) as img:
                 img.verify()
@@ -639,7 +639,7 @@ def _puntuar_con_moondream(path: str, query: str, *, note: str = "") -> int:
     if _MOONDREAM_AVAILABLE is False:
         raise RuntimeError("moondream no está disponible")
 
-    # Validación via HTTP directo a Ollama (no depende del paquete `ollama` de Python)
+                                                                                      
     api_chat = _ollama_api_url("/api/chat")
     try:
         with open(path, "rb") as f:
@@ -693,10 +693,10 @@ def descargar_mejores_imagenes_ddg(
     *,
     max_per_query: int = 8,
 ) -> tuple[List[str], List[Dict[str, Any]]]:
-    """Descarga múltiples candidatos por query, los puntúa (1-5) y elige el mejor.
-
-    Devuelve (rutas_elegidas, meta_por_segmento).
-    """
+    \
+\
+\
+\
     rutas: List[str] = []
     meta_all: List[Dict[str, Any]] = []
     notes = notes or [""] * len(queries)
@@ -720,7 +720,7 @@ def descargar_mejores_imagenes_ddg(
         best_k = None
 
         for k, (url, title) in enumerate(candidatos, start=1):
-            # Guardar candidato con nombre estable
+                                                  
             parsed = url.split("?")[0].lower()
             ext = ".jpg"
             for suf in (".jpg", ".jpeg", ".png", ".webp"):
@@ -758,7 +758,7 @@ def descargar_mejores_imagenes_ddg(
 
         selected = None
         if best_path and best_score >= int(MIN_IMG_SCORE):
-            # Copiar/normalizar a ruta estable por segmento
+                                                           
             ext = os.path.splitext(best_path)[1].lower() or ".jpg"
             stable = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
             try:
@@ -796,21 +796,34 @@ def _seleccionar_candidatos_interactivo(
     audios: List[str],
     duraciones: List[float],
 ) -> tuple[List[str], List[Dict[str, Any]]]:
-    """Permite elegir manualmente qué candidato usar por segmento.
-
-    - No cambia audios ni TTS.
-    - Solo reemplaza el archivo estable seg_XX_chosen.* antes del render.
-    """
+    \
+\
+\
+\
+\
     n = min(len(segmentos), len(imagenes), len(img_meta), len(audios), len(duraciones))
     if n <= 0:
         return imagenes, img_meta
 
     print("\n[CUSTOM] Selección manual de imágenes (opcional)")
-    print("- ENTER: mantener la imagen actual")
-    print("- Número: elegir ese candidato")
-    print("- s: saltar selección y continuar")
+    print("Se recorre segmento por segmento; puedes volver atrás.")
 
-    for i in range(n):
+    def _open_file_default(path: str):
+        try:
+            if os.name == "nt":
+                os.startfile(path)                              
+                return
+        except Exception:
+            pass
+        try:
+            import webbrowser
+
+            webbrowser.open("file://" + os.path.abspath(path))
+        except Exception:
+            pass
+
+    i = 0
+    while i < n:
         seg_idx_1 = i + 1
         seg_tag = f"seg_{seg_idx_1:02d}"
         meta = img_meta[i] if i < len(img_meta) else {}
@@ -846,6 +859,16 @@ def _seleccionar_candidatos_interactivo(
 
         if not cands:
             print("Candidatos: (no hay candidatos guardados para este segmento)")
+                                               
+            print("\nOpciones: 6) Atrás   7) Salir y renderizar   1) Siguiente")
+            opt = input("> ").strip()
+            if opt == "6" and i > 0:
+                i -= 1
+                continue
+            if opt == "7":
+                print("[CUSTOM] Selección manual finalizada.")
+                break
+            i += 1
             continue
 
         print("Candidatos disponibles:")
@@ -859,15 +882,76 @@ def _seleccionar_candidatos_interactivo(
             t = re.sub(r"\s+", " ", str(t)).strip()
             print(f"  {ci}. score={sc} path={p} title={t[:80]}")
 
-        ans = input("Elegir candidato (ENTER para mantener, s para saltar): ").strip().lower()
-        if ans == "s":
-            print("[CUSTOM] Selección manual omitida.")
+        print("\nOpciones:")
+        print("  1) Mantener imagen actual y seguir")
+        print("  2) Elegir candidato (por número)")
+        print("  3) Ver un candidato (por número)")
+        print("  4) Ver imagen actual")
+        print("  5) Abrir audio del segmento")
+        print("  6) Atrás (segmento anterior)")
+        print("  7) Salir y renderizar")
+
+        opt = input("> ").strip()
+
+        if opt == "6":
+            if i > 0:
+                i -= 1
+            else:
+                print("[CUSTOM] Ya estás en el primer segmento.")
+            continue
+        if opt == "7":
+            print("[CUSTOM] Selección manual finalizada.")
             break
-        if not ans:
+        if opt == "4":
+            cur = imagenes[i] if i < len(imagenes) else ""
+            if cur and os.path.exists(cur):
+                _open_file_default(cur)
+            else:
+                print("[CUSTOM] No hay imagen actual para abrir.")
+            continue
+        if opt == "5":
+            ap = audio_path
+            if ap and os.path.exists(ap):
+                _open_file_default(ap)
+            else:
+                print("[CUSTOM] No hay audio para abrir.")
+            continue
+        if opt == "3":
+            kraw = input("Número de candidato a ver: ").strip()
+            try:
+                kview = int(kraw)
+            except Exception:
+                continue
+
+            chosen_view = None
+            for c in cands:
+                if isinstance(c, dict) and int(c.get("candidate_index") or -1) == kview:
+                    chosen_view = c
+                    break
+            if not chosen_view:
+                print("[CUSTOM] Ese candidato no existe.")
+                continue
+            relp = str(chosen_view.get("path") or "").strip()
+            if not relp:
+                print("[CUSTOM] Candidato sin path.")
+                continue
+            absp = os.path.join(carpeta, relp.replace("/", os.sep))
+            if not os.path.exists(absp):
+                print("[CUSTOM] Archivo no existe:", absp)
+                continue
+            _open_file_default(absp)
             continue
 
+        if opt == "1":
+            i += 1
+            continue
+
+        if opt != "2":
+            continue
+
+        kraw = input("Número de candidato a elegir: ").strip()
         try:
-            chosen_k = int(ans)
+            chosen_k = int(kraw)
         except Exception:
             continue
 
@@ -899,10 +983,10 @@ def _seleccionar_candidatos_interactivo(
             print(f"[CUSTOM] No se pudo fijar imagen elegida: {e}")
             continue
 
-        # Actualiza lista final de imágenes
+                                           
         imagenes[i] = stable
 
-        # Actualiza metadata seleccionada
+                                         
         selected = {
             "candidate_index": int(chosen.get("candidate_index") or chosen_k),
             "score": int(chosen.get("score") or 1),
@@ -917,6 +1001,7 @@ def _seleccionar_candidatos_interactivo(
             segmentos[i]["image_selection"] = meta
 
         print(f"[CUSTOM] ✅ Elegida imagen candidato {chosen_k} para segmento {seg_idx_1}")
+        i += 1
 
     return imagenes, img_meta
 
@@ -956,9 +1041,9 @@ def _copiar_imagen_manual_a_segmento(carpeta: str, seg_index_1: int, src: str) -
         raise ValueError("Ruta/URL vacía")
 
     if src.lower().startswith("http://") or src.lower().startswith("https://"):
-        # Descargar desde URL
+                             
         url = src
-        # Ext tentativa
+                       
         ext = ".jpg"
         parsed = url.split("?")[0].lower()
         for suf in (".jpg", ".jpeg", ".png", ".webp"):
@@ -970,7 +1055,7 @@ def _copiar_imagen_manual_a_segmento(carpeta: str, seg_index_1: int, src: str) -
             raise RuntimeError("No se pudo descargar la imagen")
         return out
 
-    # Copiar desde archivo local
+                                
     if not os.path.exists(src):
         raise FileNotFoundError(f"No existe: {src}")
     if not _es_imagen_valida(src):
@@ -1033,7 +1118,7 @@ def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts:
         total_words_min, total_words_max = 850, 1200
         per_seg_min, per_seg_max = 80, 140
     else:
-        # Formato corto pero >= 60s
+                                   
         seg_min, seg_max = 6, 10
         total_words_min, total_words_max = _target_word_range(target_seconds)
         per_seg_min, per_seg_max = 22, 55
@@ -1090,7 +1175,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     if not brief_in:
         raise ValueError("Brief vacio")
 
-    # Duración mínima seleccionada por el usuario (default 60s)
+                                                               
     target_seconds = int(min_seconds or DEFAULT_CUSTOM_MIN_VIDEO_SEC)
     if target_seconds not in (60, 300):
         target_seconds = max(60, target_seconds)
@@ -1098,7 +1183,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
     contexto = _buscar_contexto_web(brief)
 
-    # Generación base del plan (reintentos si no cumple estructura mínima)
+                                                                          
     plan: Dict[str, Any] | None = None
     segmentos: List[Dict[str, Any]] = []
     titulo = ""
@@ -1135,7 +1220,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
         if not segmentos:
             continue
 
-        # Validación mínima: cantidad de segmentos y palabras razonables
+                                                                        
         seg_count = len(segmentos)
         minw, avgw, _maxw = _segments_word_stats(segmentos)
         total_words = _words(script) if script else sum(_words(s.get("text_es", "")) for s in segmentos)
@@ -1160,11 +1245,11 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     if not script:
         script = " ".join([s.get("text_es", "") for s in segmentos]).strip()
 
-    # Enforce mínimo: extender en tandas agregando segmentos (no reescribir todo).
+                                                                                  
     est = _estimar_segundos(script)
     if est < float(target_seconds):
         for _ in range(6):
-            # Cuántas palabras faltan aproximadamente
+                                                     
             cur_words = _words(script)
             wmin, _wmax = _target_word_range(target_seconds)
             target_words = max(wmin + 40, int(wmin * 1.10))
@@ -1176,7 +1261,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
             try:
                 arr = _extract_json_array(raw)
             except Exception:
-                # Intento de auto-fix usando el reparador ya existente
+                                                                      
                 fix = (
                     "You returned INVALID JSON array. Fix it and return ONLY a valid JSON array.\n"
                     "INVALID_JSON_START\n" + (raw or "")[:8000] + "\nINVALID_JSON_END\n"
@@ -1215,7 +1300,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 f"El guion estimado ({int(est)}s) no cumple el mínimo ({target_seconds}s)."
             )
 
-    # Asegurar cierre con dato curioso final (evita finales vacíos o genéricos)
+                                                                               
     try:
         if segmentos and not _es_cierre_valido(str(segmentos[-1].get("text_es") or "")):
             for attempt in range(2):
@@ -1247,7 +1332,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 script = " ".join([s.get("text_es", "") for s in segmentos]).strip()
                 break
     except Exception:
-        # Si no se puede asegurar el cierre por Ollama, se deja como está.
+                                                                          
         pass
 
     prompts_final = [s.get("image_prompt") or s.get("image_query") or "photo" for s in segmentos]
@@ -1297,7 +1382,7 @@ def generar_video_personalizado(
         return False
 
     textos = [s.get("text_es", "") for s in segmentos]
-    # Queries: usar las que genera Llama por segmento (evita que se vuelva genérico).
+                                                                                     
     queries = [
         (str(s.get("image_query") or "").strip() or str(s.get("image_prompt") or "").strip() or brief)
         for s in segmentos
@@ -1305,20 +1390,20 @@ def generar_video_personalizado(
 
     notes = [str(s.get("note") or "").strip() for s in segmentos]
 
-    # Selección robusta: descargar varios candidatos y elegir el mejor (score 1-5).
+                                                                                   
     imagenes, img_meta = descargar_mejores_imagenes_ddg(carpeta, queries, notes, max_per_query=8)
     if len(imagenes) != len(textos):
         print(f"[CUSTOM] ❌ Imágenes insuficientes: {len(imagenes)}/{len(textos)}. Se aborta.")
         return False
 
-    # Enriquecer plan con selección de imagen por segmento
+                                                          
     for i, seg in enumerate(segmentos):
         meta = img_meta[i] if i < len(img_meta) else None
         if not isinstance(seg, dict) or not meta:
             continue
         seg["image_selection"] = meta
 
-    # Generar título YouTube (corto y llamativo)
+                                                
     try:
         yt_title = generar_titulo_youtube(brief, str(plan.get("script_es") or ""))
         plan["youtube_title_es"] = yt_title
@@ -1338,7 +1423,7 @@ def generar_video_personalizado(
 
     duraciones = [max(0.6, audio_duration_seconds(a)) for a in audios]
 
-    # Permitir selección manual justo antes del render (sin tocar audios)
+                                                                         
     if seleccionar_imagenes:
         try:
             imagenes, img_meta = _seleccionar_candidatos_interactivo(
@@ -1360,7 +1445,7 @@ def generar_video_personalizado(
         pos = end
     plan["timeline"] = timeline
 
-    # Guardar plan actualizado (con selección y título)
+                                                       
     try:
         with open(plan_path, "w", encoding="utf-8") as f:
             json.dump(plan, f, ensure_ascii=False, indent=2)
@@ -1387,10 +1472,10 @@ def generar_video_personalizado(
 
 
 def renderizar_video_personalizado_desde_plan(carpeta_plan: str, *, voz: str, velocidad: str) -> bool:
-    """Re-renderiza un video personalizado desde un custom_plan.json existente.
-
-    Permite reemplazar imágenes por índice antes de renderizar.
-    """
+    \
+\
+\
+\
     carpeta_plan = os.path.abspath(carpeta_plan)
     plan_file = carpeta_plan
     if os.path.isdir(plan_file):
@@ -1403,4 +1488,123 @@ def renderizar_video_personalizado_desde_plan(carpeta_plan: str, *, voz: str, ve
         with open(plan_file, "r", encoding="utf-8") as f:
             plan = json.load(f)
     except Exception as e:
-        print(f"
+        print(f"[CUSTOM] ❌ No se pudo leer plan: {e}")
+        return False
+
+    segmentos = plan.get("segments") or []
+    if not isinstance(segmentos, list) or not segmentos:
+        print("[CUSTOM] ❌ Plan sin segmentos")
+        return False
+
+                                                
+    n = len(segmentos)
+    while True:
+        print("\n[CUSTOM] Segmentos y selección actual:")
+        for i, seg in enumerate(segmentos, start=1):
+            sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
+            p = (sel or {}).get("path") if isinstance(sel, dict) else None
+            sc = (sel or {}).get("score") if isinstance(sel, dict) else None
+            note = str((seg or {}).get("note") or "").strip()
+            print(f"  {i}. score={sc} img={p or 'N/A'} | {note[:80]}")
+
+        raw = input("\nReemplazar imagen (1-{}), o ENTER para renderizar: ".format(n)).strip()
+        if not raw:
+            break
+        try:
+            idx = int(raw)
+        except Exception:
+            continue
+        if idx < 1 or idx > n:
+            continue
+        src = input("Ruta local o URL de la nueva imagen: ").strip()
+        try:
+            new_path = _copiar_imagen_manual_a_segmento(carpeta_plan, idx, src)
+            q = str((segmentos[idx - 1] or {}).get("image_query") or "").strip() or str((segmentos[idx - 1] or {}).get("image_prompt") or "").strip()
+            note = str((segmentos[idx - 1] or {}).get("note") or "").strip()
+            score = _puntuar_con_moondream(new_path, q, note=note)
+            rel = os.path.relpath(new_path, carpeta_plan).replace("\\", "/")
+            segmentos[idx - 1]["image_selection"] = {
+                "query": q,
+                "note": note,
+                "candidates": [],
+                "selected": {
+                    "candidate_index": None,
+                    "score": int(score),
+                    "url": None,
+                    "title": "manual",
+                    "path": rel,
+                },
+            }
+            plan["segments"] = segmentos
+            with open(plan_file, "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+            print(f"[CUSTOM] ✅ Imagen reemplazada para segmento {idx} (score={score})")
+        except Exception as e:
+            print(f"[CUSTOM] ❌ No se pudo reemplazar: {e}")
+
+                             
+    try:
+        brief = str(plan.get("brief") or "").strip()
+        script = str(plan.get("script_es") or "").strip()
+        plan["youtube_title_es"] = generar_titulo_youtube(brief, script)
+        with open(plan_file, "w", encoding="utf-8") as f:
+            json.dump(plan, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[CUSTOM] ❌ No se pudo generar título YouTube: {e}")
+        return False
+
+                                    
+    imagenes: List[str] = []
+    for i, seg in enumerate(segmentos, start=1):
+        sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
+        rel = (sel or {}).get("path") if isinstance(sel, dict) else None
+        if not rel:
+            print(f"[CUSTOM] ❌ Falta imagen seleccionada para segmento {i}")
+            return False
+        abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep))
+        if not _es_imagen_valida(abs_path):
+            print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
+            return False
+        imagenes.append(abs_path)
+
+                                                       
+    textos = [str(s.get("text_es") or "") for s in segmentos]
+    audios: List[str] = []
+    reuse_ok = True
+    for i in range(len(textos)):
+        p1 = os.path.join(carpeta_plan, f"audio_{i}.mp3")
+        p2 = os.path.join(carpeta_plan, f"audio_{i}.wav")
+        if os.path.exists(p1) and os.path.getsize(p1) > 0:
+            audios.append(p1)
+        elif os.path.exists(p2) and os.path.getsize(p2) > 0:
+            audios.append(p2)
+        else:
+            reuse_ok = False
+            break
+
+    if not reuse_ok:
+        audios = tts.generar_audios(textos, carpeta_plan, voz=voz, velocidad=velocidad)
+        if len(audios) != len(textos):
+            print("[CUSTOM] ❌ No se pudieron generar todos los audios")
+            return False
+
+    duraciones = [max(0.6, audio_duration_seconds(a)) for a in audios]
+    timeline = []
+    pos = 0.0
+    for q, d in zip([str(s.get("image_query") or s.get("image_prompt") or "") for s in segmentos], duraciones):
+        timeline.append({"prompt": q, "start": round(pos, 2), "end": round(pos + d, 2)})
+        pos += d
+    plan["timeline"] = timeline
+    with open(plan_file, "w", encoding="utf-8") as f:
+        json.dump(plan, f, ensure_ascii=False, indent=2)
+
+    audio_final = combine_audios_with_silence(audios, carpeta_plan, gap_seconds=0, min_seconds=None, max_seconds=None)
+    video_final = render_video_ffmpeg(imagenes, audio_final, carpeta_plan, tiempo_img=None, durations=duraciones)
+
+    try:
+        append_intro_to_video(video_final, title_text=plan.get("youtube_title_es") or plan.get("title_es"))
+    except Exception as e:
+        print(f"[CUSTOM] ⚠️ No se pudo agregar intro: {e}")
+
+    print("[CUSTOM] ✅ Video personalizado re-renderizado")
+    return True

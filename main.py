@@ -493,12 +493,15 @@ if __name__ == "__main__":
         brief = input("Tema/brief para video personalizado (usar imágenes reales de internet): ").strip()
         dur_opt = input("Duración mínima (1=1 minuto, 2=5 minutos) [1]: ").strip()
         min_seconds = 60 if dur_opt != "2" else 300
+        sel_opt = input("¿Quieres elegir manualmente las imágenes antes del render? (s/N): ").strip().lower()
+        seleccionar_imagenes = sel_opt == "s"
         try:
             ok = custom_video.generar_video_personalizado(
                 brief,
                 voz=VOZ,
                 velocidad=VELOCIDAD,
                 min_seconds=min_seconds,
+                seleccionar_imagenes=seleccionar_imagenes,
             )
             print("[MAIN] Resultado:", "✅ Exito" if ok else "❌ Falló")
         except Exception as e:
