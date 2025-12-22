@@ -28,6 +28,10 @@ except Exception:
 _MOONDREAM_AVAILABLE: bool | None = None
 _DEBUG_IMG_VALIDATION = (os.environ.get("DEBUG_IMG_VALIDATION") or "").strip() in {"1", "true", "True", "YES", "yes"}
 
+                                                                     
+MOONDREAM_TIMEOUT_SEC = int(os.environ.get("MOONDREAM_TIMEOUT_SEC", "90") or "90")
+MOONDREAM_RETRIES = int(os.environ.get("MOONDREAM_RETRIES", "3") or "3")
+
 import requests
 
                                                                                     
@@ -89,6 +93,11 @@ DEFAULT_CUSTOM_MIN_VIDEO_SEC = int(os.environ.get("CUSTOM_MIN_VIDEO_SEC", "60") 
 
                                                                                          
 MIN_IMG_SCORE = int(os.environ.get("CUSTOM_MIN_IMG_SCORE", "1") or "1")
+
+                                                                                           
+CUSTOM_IMG_MAX_PER_QUERY = int(os.environ.get("CUSTOM_IMG_MAX_PER_QUERY", "8") or "8")
+                                                   
+CUSTOM_IMG_QUALITY = (os.environ.get("CUSTOM_IMG_QUALITY") or "").strip().lower()
 
 
 def _estimar_segundos(texto: str) -> float:
@@ -657,33 +666,75 @@ def _puntuar_con_moondream(path: str, query: str, *, note: str = "") -> int:
         + (f"Extra context: {note_line}. " if note_line else "")
         + "Do not add any other text."
     )
-    try:
-        payload = {
-            "model": "moondream",
-            "stream": False,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt,
-                    "images": [img_b64],
-                }
-            ],
-            "options": {"temperature": 0.1},
-        }
-        r = requests.post(api_chat, json=payload, timeout=30)
-        r.raise_for_status()
-        data = r.json() if r.content else {}
-        _MOONDREAM_AVAILABLE = True
-        ans = str((data.get("message") or {}).get("content") or "").strip().upper()
-        if _DEBUG_IMG_VALIDATION:
-            print(f"[IMG-DDG] moondream => {ans[:80]}")
-        m = re.search(r"\b([1-5])\b", ans)
-        if not m:
-            return 1
-        return int(m.group(1))
-    except Exception as e:
-        _MOONDREAM_AVAILABLE = False
-        raise RuntimeError(f"Validación moondream no disponible ({api_chat}): {e}")
+    payload = {
+        "model": "moondream",
+        "stream": False,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [img_b64],
+            }
+        ],
+        "options": {"temperature": 0.1},
+    }
+
+    last_err: Exception | None = None
+    tries = max(1, int(MOONDREAM_RETRIES))
+    timeout = max(10, int(MOONDREAM_TIMEOUT_SEC))
+
+    def _is_transient_error(err: Exception) -> bool:
+                                                                                 
+        try:
+            import requests as _rq
+
+            if isinstance(err, (_rq.Timeout, _rq.ConnectionError)):
+                return True
+            if isinstance(err, _rq.HTTPError):
+                resp = getattr(err, "response", None)
+                code = getattr(resp, "status_code", None)
+                return code in {429, 500, 502, 503, 504}
+        except Exception:
+            pass
+
+        msg = str(err).lower()
+        if any(k in msg for k in ("timeout", "timed out", "connection", "reset", "broken pipe")):
+            return True
+        return False
+
+    for attempt in range(tries):
+        try:
+            r = requests.post(api_chat, json=payload, timeout=timeout)
+            r.raise_for_status()
+            data = r.json() if r.content else {}
+            _MOONDREAM_AVAILABLE = True
+            ans = str((data.get("message") or {}).get("content") or "").strip().upper()
+            if _DEBUG_IMG_VALIDATION:
+                print(f"[IMG-DDG] moondream => {ans[:80]}")
+            m = re.search(r"\b([1-5])\b", ans)
+            if not m:
+                return 1
+            return int(m.group(1))
+        except Exception as e:
+            last_err = e
+                                                                                                                     
+            if attempt < tries - 1:
+                sleep_s = 1.5 * (attempt + 1)
+                if _DEBUG_IMG_VALIDATION:
+                    print(f"[IMG-DDG] ⚠️ moondream fallo intento {attempt+1}/{tries}: {e} -> esperando {sleep_s:.1f}s")
+                time.sleep(sleep_s)
+                continue
+            break
+
+                                                                         
+                                                            
+    if last_err and _is_transient_error(last_err):
+        _MOONDREAM_AVAILABLE = None
+        raise RuntimeError(f"Validación moondream transitoria ({api_chat}): {last_err}")
+
+                                                                     
+    _MOONDREAM_AVAILABLE = False
+    raise RuntimeError(f"Validación moondream no disponible ({api_chat}): {last_err}")
 
 
 def descargar_mejores_imagenes_ddg(
@@ -703,6 +754,16 @@ def descargar_mejores_imagenes_ddg(
 
     cand_dir = os.path.join(carpeta, "candidates")
     os.makedirs(cand_dir, exist_ok=True)
+
+                                                                                       
+    if max_per_query == 8 and CUSTOM_IMG_MAX_PER_QUERY != 8:
+        max_per_query = max(1, int(CUSTOM_IMG_MAX_PER_QUERY))
+
+                                                                    
+    if CUSTOM_IMG_QUALITY in {"high", "alta"}:
+        max_per_query = max(max_per_query, 14)
+    elif CUSTOM_IMG_QUALITY in {"best", "max", "maxima", "máxima"}:
+        max_per_query = max(max_per_query, 24)
 
     for idx, q in enumerate(queries):
         note = notes[idx] if idx < len(notes) else ""
@@ -755,6 +816,45 @@ def descargar_mejores_imagenes_ddg(
 
             if best_score >= 5:
                 break
+
+                                                                                                        
+        if (best_score < int(MIN_IMG_SCORE)) and (CUSTOM_IMG_QUALITY in {"high", "alta", "best", "max", "maxima", "máxima"}):
+            extra = 32 if CUSTOM_IMG_QUALITY in {"best", "max", "maxima", "máxima"} else 20
+            candidatos2 = _buscar_ddg_imagenes(q, max_results=max(max_per_query, extra))
+                                             
+            seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
+            nuevos = [(u, t) for (u, t) in candidatos2 if u not in seen]
+            for k2, (url, title) in enumerate(nuevos, start=len(cand_meta) + 1):
+                parsed = url.split("?")[0].lower()
+                ext = ".jpg"
+                for suf in (".jpg", ".jpeg", ".png", ".webp"):
+                    if parsed.endswith(suf):
+                        ext = ".jpg" if suf == ".jpeg" else suf
+                        break
+                dst = os.path.join(cand_dir, f"{seg_tag}_{k2:02d}{ext}")
+                saved = _descargar_imagen_a_archivo(url, dst)
+                if not saved:
+                    continue
+                try:
+                    score = _puntuar_con_moondream(saved, q, note=note)
+                except Exception as e:
+                    print(f"[IMG-DDG] ❌ No se pudo puntuar candidato {k2} de '{q}': {e}")
+                    score = 1
+                cand_meta.append({
+                    "candidate_index": k2,
+                    "url": url,
+                    "title": title,
+                    "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
+                    "score": int(score),
+                })
+                if score > best_score:
+                    best_score = score
+                    best_path = saved
+                    best_url = url
+                    best_title = title
+                    best_k = k2
+                if best_score >= 5:
+                    break
 
         selected = None
         if best_path and best_score >= int(MIN_IMG_SCORE):

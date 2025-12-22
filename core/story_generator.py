@@ -18,6 +18,11 @@ OLLAMA_URL_ENV = "OLLAMA_URL"
 OLLAMA_MODEL_ENV = "OLLAMA_MODEL"
 OLLAMA_URL_DEFAULT = "http://localhost:11434/api/generate"
 OLLAMA_TIMEOUT_ENV = "OLLAMA_TIMEOUT"
+                                                                             
+STORY_QUALITY_ENV = "STORY_QUALITY"
+                                                              
+                                                             
+OLLAMA_OPTIONS_JSON_ENV = "OLLAMA_OPTIONS_JSON"
                                                                                
 MAX_TOKENS_GEN = 12000
 
@@ -91,6 +96,22 @@ def _provider() -> str:
     return val
 
 
+def _story_quality() -> str:
+    return (_get_env(STORY_QUALITY_ENV, "") or "").strip().lower()
+
+
+def _ollama_options_from_env() -> dict:
+    raw = (_get_env(OLLAMA_OPTIONS_JSON_ENV, "") or "").strip()
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        print(f"[GPT] ⚠️ {OLLAMA_OPTIONS_JSON_ENV} no es JSON válido; ignorando")
+        return {}
+
+
 def _model_name() -> str:
     raw = _get_env("GEMINI_MODEL", MODEL_NAME_DEFAULT)
     name = (raw or "").strip()
@@ -162,14 +183,31 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
     model = (_get_env(OLLAMA_MODEL_ENV, "llama3.1") or "llama3.1").strip()
     timeout_s = int((_get_env(OLLAMA_TIMEOUT_ENV, "180") or "180").strip() or "180")
     print(f"[GPT] Usando Ollama modelo: {model} @ {url} (timeout {timeout_s}s)")
+                                                    
+    options = {
+        "temperature": temperature,
+        "num_predict": max_tokens,
+    }
+
+                                                                 
+    q = _story_quality()
+    if q in {"high", "alta"}:
+        options.setdefault("num_ctx", 8192)
+        options.setdefault("top_p", 0.9)
+        options.setdefault("repeat_penalty", 1.12)
+    elif q in {"best", "max", "maxima", "máxima"}:
+        options.setdefault("num_ctx", 16384)
+        options.setdefault("top_p", 0.9)
+        options.setdefault("repeat_penalty", 1.15)
+
+                                                       
+    options.update(_ollama_options_from_env())
+
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,
-        },
+        "options": options,
     }
     last_err = None
     for intento in range(2):
@@ -191,6 +229,29 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
     raise last_err
 
 
+def _refinar_historia(texto: str, genero: str) -> str:
+    \
+    texto = (texto or "").strip()
+    if not texto:
+        return texto
+
+    prompt = (
+        "Eres un editor profesional de guiones/historias en español para narración. "
+        f"Tu tarea: mejorar la historia del género '{genero}' manteniendo la trama, pero: "
+        "(1) reduce repetición y muletillas, (2) mejora coherencia y continuidad, "
+        "(3) refuerza tensión y giros sin agregar relleno, (4) mejora ritmo en párrafos. "
+        "NO cambies el final a uno genérico; NO agregues listas, títulos ni encabezados. "
+        "Devuelve SOLO el texto final (no JSON, no comentarios).\n\n"
+        "HISTORIA:\n" + texto
+    )
+
+    prov = _provider()
+                                                     
+    if prov == "ollama":
+        return _call_ollama(prompt, temperature=0.25, max_tokens=min(MAX_TOKENS_GEN, 9000))
+    return _call_genai(prompt, temperature=0.25, max_tokens=min(MAX_TOKENS_GEN, 9000))
+
+
 def _generar_historia_genero(genero: str, *, inventar: bool = False) -> str:
     prompt = (
         "Eres un escritor que crea historias largas, en español, con tono narrativo y giros que enganchen. "
@@ -204,10 +265,14 @@ def _generar_historia_genero(genero: str, *, inventar: bool = False) -> str:
         prompt += " Si falta contexto o datos, inventa detalles morbosos y de chisme sin perder coherencia."
 
     prov = _provider()
+    q = _story_quality()
+                                                                                  
+    temp = 0.85 if q in {"high", "best", "alta", "max", "maxima", "máxima"} else 0.9
+
     if prov == "ollama":
-        raw = _call_ollama(prompt, temperature=0.9, max_tokens=MAX_TOKENS_GEN)
+        raw = _call_ollama(prompt, temperature=temp, max_tokens=MAX_TOKENS_GEN)
     else:
-        raw = _call_genai(prompt, temperature=0.9, max_tokens=MAX_TOKENS_GEN)
+        raw = _call_genai(prompt, temperature=temp, max_tokens=MAX_TOKENS_GEN)
     try:
         data = json.loads(raw)
         texto = data.get("historia") if isinstance(data, dict) else None
@@ -215,7 +280,14 @@ def _generar_historia_genero(genero: str, *, inventar: bool = False) -> str:
             return texto.strip()
     except Exception:
         pass
-    return raw
+                                                                    
+    out = raw
+    if q in {"high", "best", "alta", "max", "maxima", "máxima"}:
+        try:
+            out = _refinar_historia(out, genero)
+        except Exception as e:
+            print(f"[GPT] ⚠️ No se pudo refinar historia: {e}")
+    return out
 
 
 def _validar_historia(texto: str) -> tuple[bool, str]:

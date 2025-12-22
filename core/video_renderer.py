@@ -16,6 +16,72 @@ DEFAULT_VIDEOS_DIR = r"C:\Users\Leonardo\Downloads\video\media"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
 
+def _encoding_cfg() -> dict:
+    \
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+    quality = (os.environ.get("VIDEO_QUALITY") or "").strip().lower()
+
+                                      
+    preset = (os.environ.get("VIDEO_PRESET") or "veryfast").strip()
+    crf = (os.environ.get("VIDEO_CRF") or "20").strip()
+    fps = (os.environ.get("VIDEO_FPS") or "25").strip()
+    audio_bitrate = (os.environ.get("AUDIO_BITRATE") or "").strip()
+    scale_flags = (os.environ.get("VIDEO_SCALE_FLAGS") or "").strip()
+    tune = (os.environ.get("VIDEO_TUNE") or "").strip()
+
+    if quality in {"high", "alta"}:
+        preset = os.environ.get("VIDEO_PRESET") or "slow"
+        crf = os.environ.get("VIDEO_CRF") or "18"
+        audio_bitrate = os.environ.get("AUDIO_BITRATE") or "192k"
+        scale_flags = os.environ.get("VIDEO_SCALE_FLAGS") or "lanczos"
+        tune = os.environ.get("VIDEO_TUNE") or "stillimage"
+    elif quality in {"best", "max", "maxima", "máxima"}:
+        preset = os.environ.get("VIDEO_PRESET") or "veryslow"
+        crf = os.environ.get("VIDEO_CRF") or "17"
+        audio_bitrate = os.environ.get("AUDIO_BITRATE") or "256k"
+        scale_flags = os.environ.get("VIDEO_SCALE_FLAGS") or "lanczos"
+        tune = os.environ.get("VIDEO_TUNE") or "stillimage"
+
+                             
+    try:
+        int(crf)
+    except Exception:
+        crf = "20"
+    try:
+        int(float(fps))
+    except Exception:
+        fps = "25"
+
+    return {
+        "quality": quality,
+        "preset": str(preset).strip() or "veryfast",
+        "crf": str(crf).strip() or "20",
+        "fps": str(fps).strip() or "25",
+        "audio_bitrate": str(audio_bitrate).strip(),
+        "scale_flags": str(scale_flags).strip(),
+        "tune": str(tune).strip(),
+    }
+
+
+def _scale_filter(size: int) -> str:
+    cfg = _encoding_cfg()
+    flags = cfg.get("scale_flags") or ""
+    if flags:
+        return f"scale={size}:{size}:force_original_aspect_ratio=decrease:flags={flags}"
+    return f"scale={size}:{size}:force_original_aspect_ratio=decrease"
+
+
 def _pick_ffmpeg() -> str:
     env_bin = os.environ.get("FFMPEG_BIN")
     if env_bin:
@@ -265,10 +331,13 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
     filtros = []
     if speed != 1.0:
         filtros.append(f"setpts=PTS/{speed}")
-    filtros.append("scale=768:768:force_original_aspect_ratio=decrease")
+    cfg = _encoding_cfg()
+    fps = cfg["fps"]
+
+    filtros.append(_scale_filter(768))
     filtros.append("pad=768:768:(768-iw)/2:(768-ih)/2")
     filtros.append("setsar=1")
-    filtros.append("fps=25")
+    filtros.append(f"fps={fps}")
     if pad_sec > 0.05:
         filtros.append(f"tpad=stop_duration={pad_sec:.3f}")
 
@@ -288,15 +357,27 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
         "-map",
         "1:a",
         "-c:v",
-        "h264",
+        "libx264",
+        "-preset",
+        cfg["preset"],
+        "-crf",
+        cfg["crf"],
+        "-tune",
+        "film",
         "-pix_fmt",
         "yuv420p",
         "-c:a",
         "aac",
+        "-ar",
+        "48000",
         "-movflags",
         "+faststart",
         _ffmpeg_path(salida),
     ]
+
+    if cfg.get("audio_bitrate"):
+        cmd.insert(cmd.index("-movflags"), "-b:a")
+        cmd.insert(cmd.index("-movflags"), cfg["audio_bitrate"])
 
     print(f"[VIDEO] Base: {video_abs} (dur ~{dur_video:.1f}s) | Audio ~{dur_audio:.1f}s")
     if speed != 1.0:
@@ -452,6 +533,9 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
     filter_parts: list[str] = []
     vlabels: list[str] = []
 
+    cfg = _encoding_cfg()
+    fps = cfg["fps"]
+
     for idx, img in enumerate(imagenes):
         dur_val = max(0.5, float(dur_list[idx])) if dur_list else max(0.5, float(tiempo_img))
         inputs.extend(["-loop", "1", "-t", str(dur_val), "-i", _ffmpeg_path(img)])
@@ -459,7 +543,7 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
         vlabel = f"v{idx}"
         vlabels.append(f"[{vlabel}]")
         filter_parts.append(
-            f"[{idx}:v]fps=25,scale=768:768:force_original_aspect_ratio=decrease,"
+            f"[{idx}:v]fps={fps},{_scale_filter(768)},"
             f"pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[{vlabel}]"
         )
 
@@ -485,21 +569,31 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
             "-c:v",
             "libx264",
             "-preset",
-            "veryfast",
+            cfg["preset"],
             "-crf",
-            "20",
+            cfg["crf"],
             "-pix_fmt",
             "yuv420p",
             "-r",
-            "25",
+            fps,
             "-c:a",
             "aac",
+            "-ar",
+            "48000",
             "-movflags",
             "+faststart",
             "-shortest",
             _ffmpeg_path(salida),
         ]
     )
+
+    if cfg.get("tune"):
+        cmd.insert(cmd.index("-pix_fmt"), "-tune")
+        cmd.insert(cmd.index("-pix_fmt"), cfg["tune"])
+
+    if cfg.get("audio_bitrate"):
+        cmd.insert(cmd.index("-movflags"), "-b:a")
+        cmd.insert(cmd.index("-movflags"), cfg["audio_bitrate"])
 
     print("[VIDEO] Ejecutando FFmpeg...")
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -544,6 +638,17 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
     if not os.path.exists(intro_fs):
         raise FileNotFoundError(f"[VIDEO] No se encontró el intro: {intro_fs}")
 
+                                                                                                               
+    try:
+        intro_size = os.path.getsize(intro_fs)
+    except Exception:
+        intro_size = -1
+    if intro_size is not None and intro_size >= 0 and intro_size < 1024:
+        raise ValueError(
+            f"[VIDEO] El intro parece inválido (tamaño {intro_size} bytes): {intro_fs}. "
+            "Reemplázalo por un MP4 real (no vacío) y vuelve a intentar."
+        )
+
     ffmpeg = _pick_ffmpeg()
     base, ext = os.path.splitext(os.path.basename(video_fs))
     carpeta_salida = os.path.dirname(video_fs)
@@ -554,10 +659,13 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
     intro_abs = _ffmpeg_path(intro_fs)
     salida = _ffmpeg_path(salida_fs)
 
+    cfg = _encoding_cfg()
+    fps = cfg["fps"]
+
     filter_complex = (
-        "[0:v]fps=25,scale=768:768:force_original_aspect_ratio=decrease,"
+        f"[0:v]fps={fps},{_scale_filter(768)},"
         "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
-        "[1:v]fps=25,scale=768:768:force_original_aspect_ratio=decrease,"
+        f"[1:v]fps={fps},{_scale_filter(768)},"
         "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,setpts=PTS-STARTPTS[v1];"
         "[0:a]aresample=48000,asetpts=PTS-STARTPTS[a0];"
         "[1:a]aresample=48000,asetpts=PTS-STARTPTS[a1];"
@@ -572,13 +680,22 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
         "-map", "[v]",
         "-map", "[a]",
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "20",
+        "-preset", cfg["preset"],
+        "-crf", cfg["crf"],
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
+        "-ar", "48000",
         "-movflags", "+faststart",
         salida
     ]
+
+    if cfg.get("tune"):
+        cmd.insert(cmd.index("-pix_fmt"), "-tune")
+        cmd.insert(cmd.index("-pix_fmt"), cfg["tune"])
+
+    if cfg.get("audio_bitrate"):
+        cmd.insert(cmd.index("-movflags"), "-b:a")
+        cmd.insert(cmd.index("-movflags"), cfg["audio_bitrate"])
 
     print("[VIDEO] Ejecutando FFmpeg para agregar intro...")
     subprocess.run(cmd, check=True)
@@ -599,9 +716,12 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
     nombre = _slugify_title(title_text) if title_text else "clip"
     salida_fs = os.path.join(carpeta_salida, f"{nombre}.mp4")
 
-                                                                                              
+    cfg = _encoding_cfg()
+    fps = cfg["fps"]
+
+                                                                                                   
     filter_complex = (
-        "[0:v]fps=25,scale=768:768:force_original_aspect_ratio=decrease,"
+        f"[0:v]fps={fps},{_scale_filter(768)},"
         "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1[v0]"
     )
 
@@ -614,15 +734,24 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
         "-map", "[v0]",
         "-map", "1:a",
         "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-crf", "20",
+        "-preset", cfg["preset"],
+        "-crf", cfg["crf"],
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-shortest",
-        "-r", "25",
+        "-r", fps,
+        "-ar", "48000",
         "-movflags", "+faststart",
         _ffmpeg_path(salida_fs),
     ]
+
+    if cfg.get("tune"):
+        cmd.insert(cmd.index("-pix_fmt"), "-tune")
+        cmd.insert(cmd.index("-pix_fmt"), cfg["tune"])
+
+    if cfg.get("audio_bitrate"):
+        cmd.insert(cmd.index("-movflags"), "-b:a")
+        cmd.insert(cmd.index("-movflags"), cfg["audio_bitrate"])
 
     print(f"[CLIP] Renderizando corto: {salida_fs}")
     subprocess.run(cmd, check=True)

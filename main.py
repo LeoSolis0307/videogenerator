@@ -23,6 +23,13 @@ from utils.fs import crear_carpeta_proyecto, guardar_historial
 VOZ = "es-MX-JorgeNeural"
 VELOCIDAD = "-15%"                          
 
+                                                                       
+                                                                                                
+                                                    
+VIDEO_QUALITY = (os.environ.get("VIDEO_QUALITY") or "high").strip()
+if VIDEO_QUALITY:
+    os.environ["VIDEO_QUALITY"] = VIDEO_QUALITY
+
 HISTORIAS_BASE = "historias"
 HISTORIAS_GENEROS = {
     "1": "Drama y Relaciones",

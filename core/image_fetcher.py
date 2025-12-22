@@ -22,6 +22,21 @@ OLLAMA_URL = (os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate"
 OLLAMA_MODEL = (os.environ.get("OLLAMA_MODEL", "llama3.1") or "llama3.1").strip()
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
 
+                                                                
+                                                    
+OLLAMA_OPTIONS_JSON = (os.environ.get("OLLAMA_OPTIONS_JSON") or "").strip()
+
+
+def _ollama_extra_options() -> dict:
+    if not OLLAMA_OPTIONS_JSON:
+        return {}
+    try:
+        obj = json.loads(OLLAMA_OPTIONS_JSON)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        print("[IMG] ⚠️ OLLAMA_OPTIONS_JSON no es JSON válido; ignorando")
+        return {}
+
                                   
 PROMPTS = [
     "dark cinematic atmosphere",
@@ -34,14 +49,17 @@ PROMPTS = [
 
 
 def _ollama_generar_json(prompt: str) -> dict:
+    options = {
+        "temperature": 0.65,
+        "num_predict": 700,
+    }
+    options.update(_ollama_extra_options())
+
     payload = {
         "model": OLLAMA_MODEL,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": 0.65,
-            "num_predict": 700,
-        },
+        "options": options,
     }
     resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
     resp.raise_for_status()
