@@ -24,13 +24,7 @@ except Exception:
         DDGS = None
         _DDG_BACKEND = None
 
-                                                                             
-_MOONDREAM_AVAILABLE: bool | None = None
 _DEBUG_IMG_VALIDATION = (os.environ.get("DEBUG_IMG_VALIDATION") or "").strip() in {"1", "true", "True", "YES", "yes"}
-
-                                                                     
-MOONDREAM_TIMEOUT_SEC = int(os.environ.get("MOONDREAM_TIMEOUT_SEC", "90") or "90")
-MOONDREAM_RETRIES = int(os.environ.get("MOONDREAM_RETRIES", "3") or "3")
 
 import requests
 
@@ -39,6 +33,8 @@ if __name__ == "__main__" and __package__ is None:
     sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from core import tts_engine as tts
+from core import vision_llava_phi3
+from core import ollama_vram
 from core.video_renderer import (
     append_intro_to_video,
     audio_duration_seconds,
@@ -47,48 +43,19 @@ from core.video_renderer import (
 )
 from utils.fs import crear_carpeta_proyecto
 
-
+                                                                                       
+_VISION_AVAILABLE: bool | None = None
                                  
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip()
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1").strip() or "llama3.1"
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:latest").strip() or "llama3.1:latest"
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
-
-
-def _ollama_host() -> str:
-    \
-\
-\
-\
-\
-\
-    host = (os.environ.get("OLLAMA_HOST") or "").strip()
-    if host:
-        return host.rstrip("/")
-
-    raw = (OLLAMA_URL or "").strip()
-    if not raw:
-        return "http://localhost:11434"
-
-                                                            
-    try:
-        p = urlparse(raw)
-        if p.scheme and p.netloc:
-            return f"{p.scheme}://{p.netloc}".rstrip("/")
-    except Exception:
-        pass
-                                                      
-    return raw.split("/api/")[0].rstrip("/")
-
-
-def _ollama_api_url(path: str) -> str:
-    return _ollama_host().rstrip("/") + "/" + path.lstrip("/")
-
-                                              
-WIKI_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                                                                  
+                                                                      
+VISION_TIMEOUT_SEC = int(os.environ.get("VISION_TIMEOUT_SEC", os.environ.get("MOONDREAM_TIMEOUT_SEC", "90")) or "90")
+VISION_RETRIES = int(os.environ.get("VISION_RETRIES", os.environ.get("MOONDREAM_RETRIES", "3")) or "3")
+VISION_MODEL = (os.environ.get("VISION_MODEL") or "minicpm-v:latest").strip() or "minicpm-v:latest"
 
                                                                  
-                                                                           
 DEFAULT_CUSTOM_MIN_VIDEO_SEC = int(os.environ.get("CUSTOM_MIN_VIDEO_SEC", "60") or "60")
 
                                                                                          
@@ -96,73 +63,83 @@ MIN_IMG_SCORE = int(os.environ.get("CUSTOM_MIN_IMG_SCORE", "1") or "1")
 
                                                                                            
 CUSTOM_IMG_MAX_PER_QUERY = int(os.environ.get("CUSTOM_IMG_MAX_PER_QUERY", "8") or "8")
+
                                                    
 CUSTOM_IMG_QUALITY = (os.environ.get("CUSTOM_IMG_QUALITY") or "").strip().lower()
 
-
-def _estimar_segundos(texto: str) -> float:
-    palabras = len((texto or "").split())
-    if palabras <= 0:
-        return 0.0
-    wpm = 140.0
-    estimado = (palabras / wpm) * 60.0
-    estimado = estimado * 1.35 + 1.5
-    return max(3.0, estimado)
+                                                     
+WIKI_API = "https://commons.wikimedia.org/w/api.php"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 
-def _extract_json_object(raw: str) -> Dict[str, Any]:
+
+def generar_guion_personalizado_a_plan(
+    brief: str,
+    *,
+    min_seconds: int | None = None,
+    seleccionar_imagenes: bool = False,
+) -> str | None:
     \
 \
 \
 \
-    obj = _extract_json_value(raw)
-    if isinstance(obj, dict):
-        return obj
-    raise ValueError("La respuesta del LLM no fue un objeto JSON")
-
-
-def _extract_json_value(raw: str) -> Any:
-    \
-    raw = (raw or "").strip()
-    if not raw:
-        raise ValueError("Respuesta vacía del LLM")
-
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
-    raw = re.sub(r"\s*```$", "", raw).strip()
-    if not raw:
-        raise ValueError("Respuesta vacía del LLM (tras remover markdown)")
-
-             
+\
+    carpeta = crear_carpeta_proyecto(prefix="custom")
     try:
-        return json.loads(raw)
+        plan = generar_plan_personalizado(brief, min_seconds=min_seconds)
+    except Exception as e:
+        print(f"[CUSTOM] ❌ No se pudo crear el plan: {e}")
+        return None
+
+                                                                       
+    plan.setdefault("youtube_title_es", plan.get("title_es") or "Video personalizado")
+
+                                                                                 
+                                                                              
+    try:
+        if int(plan.get("target_seconds") or (min_seconds or DEFAULT_CUSTOM_MIN_VIDEO_SEC)) == 60:
+            base_title = str(plan.get("youtube_title_es") or "").strip()
+            script_es = str(plan.get("script_es") or "").strip()
+            plan["youtube_title_es"] = _append_shorts_hashtags_to_title(
+                base_title,
+                brief=str(plan.get("brief") or brief or "").strip(),
+                script_es=script_es,
+                max_total_len=100,
+            )
+    except Exception:
+        pass
+    plan["seleccionar_imagenes"] = bool(seleccionar_imagenes)
+
+    plan_path = os.path.join(carpeta, "custom_plan.json")
+    try:
+        with open(plan_path, "w", encoding="utf-8") as f:
+            json.dump(plan, f, ensure_ascii=False, indent=2)
+        print(f"[CUSTOM] ✅ Plan (solo guion) guardado en {plan_path}")
+    except Exception as e:
+        print(f"[CUSTOM] ⚠️ No se pudo guardar el plan: {e}")
+        return None
+
+                                                                      
+                                                                  
+    try:
+        if (os.environ.get("UNLOAD_TEXT_MODEL") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}:
+            if ollama_vram.try_unload_model(OLLAMA_MODEL):
+                print(f"[CUSTOM] ℹ️ Modelo de texto descargado: {OLLAMA_MODEL}")
     except Exception:
         pass
 
-                                    
-    o_s = raw.find("{")
-    o_e = raw.rfind("}")
-    if o_s != -1 and o_e != -1 and o_e > o_s:
-        chunk = raw[o_s : o_e + 1]
-        try:
-            return json.loads(chunk)
-        except Exception:
-            pass
-
-                                   
-    a_s = raw.find("[")
-    a_e = raw.rfind("]")
-    if a_s != -1 and a_e != -1 and a_e > a_s:
-        chunk = raw[a_s : a_e + 1]
-        return json.loads(chunk)
-
-    raise ValueError("No se encontró JSON parseable en la respuesta del LLM")
+    return carpeta
 
 
-def _extract_json_array(raw: str) -> List[Any]:
-    obj = _extract_json_value(raw)
-    if isinstance(obj, list):
-        return obj
-    raise ValueError("La respuesta del LLM no fue un array JSON")
+def intentar_descargar_modelo_texto() -> bool:
+    \
+\
+\
+\
+    try:
+        return bool(ollama_vram.try_unload_model(OLLAMA_MODEL))
+    except Exception:
+        return False
 
 
 def _sanitize_brief_for_duration(brief: str) -> str:
@@ -171,7 +148,6 @@ def _sanitize_brief_for_duration(brief: str) -> str:
     if not b:
         return ""
 
-                                         
     b = re.sub(r"\b(shorts?|yt\s*shorts?)\b", "", b, flags=re.IGNORECASE)
     b = re.sub(r"\b\d{1,4}\s*(segundos|segundo|s)\b", "", b, flags=re.IGNORECASE)
     b = re.sub(r"\b\d{1,3}\s*(minutos|minuto|min)\b", "", b, flags=re.IGNORECASE)
@@ -181,6 +157,20 @@ def _sanitize_brief_for_duration(brief: str) -> str:
 
 def _words(text: str) -> int:
     return len((text or "").split())
+
+
+def _estimar_segundos(texto: str) -> float:
+    \
+\
+\
+\
+    palabras = _words(texto or "")
+    if palabras <= 0:
+        return 0.0
+    wpm = 140.0
+    estimado = (palabras / wpm) * 60.0
+    estimado = estimado * 1.35 + 1.5
+    return max(3.0, float(estimado))
 
 
 def _segments_word_stats(segmentos: List[Dict[str, Any]]) -> tuple[int, int, int]:
@@ -325,6 +315,54 @@ def _generar_timeline(prompts: List[str], dur_est: float) -> List[Dict[str, Any]
         timeline.append({"prompt": prompt, "start": round(start, 2), "end": round(end, 2)})
         start = end
     return timeline
+
+
+def _extract_json_value(raw: str) -> Any:
+    \
+    raw = (raw or "").strip()
+    if not raw:
+        raise ValueError("Respuesta vacía del LLM")
+
+    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
+    raw = re.sub(r"\s*```$", "", raw).strip()
+    if not raw:
+        raise ValueError("Respuesta vacía del LLM (tras remover markdown)")
+
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+
+    o_s = raw.find("{")
+    o_e = raw.rfind("}")
+    if o_s != -1 and o_e != -1 and o_e > o_s:
+        chunk = raw[o_s : o_e + 1]
+        try:
+            return json.loads(chunk)
+        except Exception:
+            pass
+
+    a_s = raw.find("[")
+    a_e = raw.rfind("]")
+    if a_s != -1 and a_e != -1 and a_e > a_s:
+        chunk = raw[a_s : a_e + 1]
+        return json.loads(chunk)
+
+    raise ValueError("No se encontró JSON parseable en la respuesta del LLM")
+
+
+def _extract_json_object(raw: str) -> Dict[str, Any]:
+    obj = _extract_json_value(raw)
+    if isinstance(obj, dict):
+        return obj
+    raise ValueError("La respuesta del LLM no fue un objeto JSON")
+
+
+def _extract_json_array(raw: str) -> List[Any]:
+    obj = _extract_json_value(raw)
+    if isinstance(obj, list):
+        return obj
+    raise ValueError("La respuesta del LLM no fue un array JSON")
 
 
 def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int = 900) -> str:
@@ -644,97 +682,25 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
 
 
 def _puntuar_con_moondream(path: str, query: str, *, note: str = "") -> int:
-    global _MOONDREAM_AVAILABLE
-    if _MOONDREAM_AVAILABLE is False:
-        raise RuntimeError("moondream no está disponible")
-
-                                                                                      
-    api_chat = _ollama_api_url("/api/chat")
-    try:
-        with open(path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode("ascii")
-    except Exception as e:
-        print(f"[IMG-DDG] No se pudo leer imagen para validar: {e}")
+    \
+    global _VISION_AVAILABLE
+    if _VISION_AVAILABLE is False:
         return 1
 
-    note_line = (note or "").strip()
-    prompt = (
-        "Rate how coherent this image is with the requirement for a YouTube video segment. "
-        "Return ONLY a single integer from 1 to 5. "
-        "1 = completely unrelated, 2 = weak match, 3 = acceptable, 4 = good, 5 = perfect match. "
-        f"Requirement: {query}. "
-        + (f"Extra context: {note_line}. " if note_line else "")
-        + "Do not add any other text."
-    )
-    payload = {
-        "model": "moondream",
-        "stream": False,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-                "images": [img_b64],
-            }
-        ],
-        "options": {"temperature": 0.1},
-    }
-
-    last_err: Exception | None = None
-    tries = max(1, int(MOONDREAM_RETRIES))
-    timeout = max(10, int(MOONDREAM_TIMEOUT_SEC))
-
-    def _is_transient_error(err: Exception) -> bool:
-                                                                                 
-        try:
-            import requests as _rq
-
-            if isinstance(err, (_rq.Timeout, _rq.ConnectionError)):
-                return True
-            if isinstance(err, _rq.HTTPError):
-                resp = getattr(err, "response", None)
-                code = getattr(resp, "status_code", None)
-                return code in {429, 500, 502, 503, 504}
-        except Exception:
-            pass
-
-        msg = str(err).lower()
-        if any(k in msg for k in ("timeout", "timed out", "connection", "reset", "broken pipe")):
-            return True
-        return False
-
-    for attempt in range(tries):
-        try:
-            r = requests.post(api_chat, json=payload, timeout=timeout)
-            r.raise_for_status()
-            data = r.json() if r.content else {}
-            _MOONDREAM_AVAILABLE = True
-            ans = str((data.get("message") or {}).get("content") or "").strip().upper()
-            if _DEBUG_IMG_VALIDATION:
-                print(f"[IMG-DDG] moondream => {ans[:80]}")
-            m = re.search(r"\b([1-5])\b", ans)
-            if not m:
-                return 1
-            return int(m.group(1))
-        except Exception as e:
-            last_err = e
-                                                                                                                     
-            if attempt < tries - 1:
-                sleep_s = 1.5 * (attempt + 1)
-                if _DEBUG_IMG_VALIDATION:
-                    print(f"[IMG-DDG] ⚠️ moondream fallo intento {attempt+1}/{tries}: {e} -> esperando {sleep_s:.1f}s")
-                time.sleep(sleep_s)
-                continue
-            break
-
-                                                                         
-                                                            
-    if last_err and _is_transient_error(last_err):
-        _MOONDREAM_AVAILABLE = None
-        raise RuntimeError(f"Validación moondream transitoria ({api_chat}): {last_err}")
-
-                                                                     
-    _MOONDREAM_AVAILABLE = False
-    raise RuntimeError(f"Validación moondream no disponible ({api_chat}): {last_err}")
+    try:
+        score = vision_llava_phi3.score_image(
+            path,
+            query,
+            note=note,
+            model=VISION_MODEL,
+            timeout_sec=VISION_TIMEOUT_SEC,
+            retries=VISION_RETRIES,
+        )
+        _VISION_AVAILABLE = True
+        return int(score)
+    except Exception:
+        _VISION_AVAILABLE = False
+        return 1
 
 
 def descargar_mejores_imagenes_ddg(
@@ -743,6 +709,7 @@ def descargar_mejores_imagenes_ddg(
     notes: List[str] | None = None,
     *,
     max_per_query: int = 8,
+    segment_numbers: List[int] | None = None,
 ) -> tuple[List[str], List[Dict[str, Any]]]:
     \
 \
@@ -765,6 +732,9 @@ def descargar_mejores_imagenes_ddg(
     elif CUSTOM_IMG_QUALITY in {"best", "max", "maxima", "máxima"}:
         max_per_query = max(max_per_query, 24)
 
+    if segment_numbers is not None and len(segment_numbers) != len(queries):
+        raise ValueError("segment_numbers debe tener la misma longitud que queries")
+
     for idx, q in enumerate(queries):
         note = notes[idx] if idx < len(notes) else ""
         candidatos = _buscar_ddg_imagenes(q, max_results=max_per_query)
@@ -772,7 +742,8 @@ def descargar_mejores_imagenes_ddg(
             meta_all.append({"query": q, "note": note, "candidates": [], "selected": None})
             continue
 
-        seg_tag = f"seg_{idx+1:02d}"
+        seg_n = (segment_numbers[idx] if segment_numbers is not None else (idx + 1))
+        seg_tag = f"seg_{int(seg_n):02d}"
         cand_meta: List[Dict[str, Any]] = []
         best_score = -1
         best_path = None
@@ -1155,6 +1126,122 @@ def generar_titulo_youtube(brief: str, script_es: str) -> str:
     return titulo
 
 
+def _prompt_hashtags_shorts(brief: str, title_es: str, script_es: str) -> str:
+    script_snip = (script_es or "").strip().replace("\n", " ")
+    script_snip = re.sub(r"\s+", " ", script_snip)[:900]
+    title_es = re.sub(r"\s+", " ", (title_es or "").strip())[:120]
+    brief = re.sub(r"\s+", " ", (brief or "").strip())[:200]
+    return (
+        "Eres experto en SEO para YouTube Shorts en español. "
+        "Genera de 3 a 5 hashtags óptimos y relevantes para el video. "
+        "Reglas estrictas: \n"
+        "- Devuelve SOLO los hashtags separados por espacios (nada más).\n"
+        "- Deben empezar con # y no llevar espacios.\n"
+        "- Máximo 18 caracteres por hashtag.\n"
+        "- Sin tildes/acentos y sin signos raros; usa letras/números/underscore.\n"
+        "- Sin duplicados.\n"
+        "- Incluye 1 hashtag amplio de Shorts (por ejemplo #shorts o #youtubeshorts).\n"
+        "- Incluye 1-2 hashtags generales del formato (por ejemplo #curiosidades, #datoscuriosos).\n"
+        "- El resto deben ser nicho del tema (nombres propios/franquicia/objeto).\n\n"
+        f"TITULO_BASE: {title_es}\n"
+        f"BRIEF: {brief}\n"
+        f"GUION_RESUMEN: {script_snip}\n"
+    )
+
+
+def _normalizar_hashtag(tag: str) -> str:
+    t = (tag or "").strip()
+    if not t:
+        return ""
+    if not t.startswith("#"):
+        t = "#" + t
+    body = t[1:]
+                                                                                    
+    body = re.sub(r"[^A-Za-z0-9_]", "", body)
+    body = body.strip("_")
+    if not body:
+        return ""
+    return "#" + body.lower()
+
+
+def _extraer_hashtags(text: str) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+                                        
+    found = re.findall(r"#[^\s#]+", raw)
+    out: list[str] = []
+    seen = set()
+    for f in found:
+        h = _normalizar_hashtag(f)
+        if not h:
+            continue
+        if len(h) > 19:            
+            continue
+        if h in seen:
+            continue
+        seen.add(h)
+        out.append(h)
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _generar_hashtags_shorts(brief: str, title_es: str, script_es: str) -> list[str]:
+    prompt = _prompt_hashtags_shorts(brief, title_es, script_es)
+    raw = _ollama_generate_with_timeout(prompt, temperature=0.35, max_tokens=60, timeout_sec=max(OLLAMA_TIMEOUT, 60))
+    tags = _extraer_hashtags(raw)
+
+                                                           
+    if len(tags) < 3:
+        fallback = ["#shorts", "#curiosidades", "#datoscuriosos"]
+        for t in fallback:
+            h = _normalizar_hashtag(t)
+            if h and h not in tags:
+                tags.append(h)
+            if len(tags) >= 3:
+                break
+
+                  
+    tags = tags[:5]
+    if len(tags) < 3:
+                                                 
+        for t in ("#shorts", "#curiosidades", "#viral", "#historia", "#misterio"):
+            h = _normalizar_hashtag(t)
+            if h and h not in tags:
+                tags.append(h)
+            if len(tags) >= 3:
+                break
+        tags = tags[:5]
+
+    return tags
+
+
+def _append_shorts_hashtags_to_title(title_es: str, *, brief: str, script_es: str, max_total_len: int = 100) -> str:
+    base = re.sub(r"\s+", " ", (title_es or "").strip())
+    if not base:
+        base = "Video personalizado"
+
+                                                       
+    if "#" in base:
+        return base
+
+    tags = _generar_hashtags_shorts(brief, base, script_es)
+    tags_str = " ".join(tags)
+    if not tags_str:
+        return base
+
+                                                                 
+    max_total_len = int(max_total_len or 100)
+    allowed_title_len = max(10, max_total_len - 1 - len(tags_str))
+    if len(base) > allowed_title_len:
+        base = base[:allowed_title_len].rstrip()
+                                                                       
+        base = base.rstrip("-:|,.;")
+
+    return f"{base} {tags_str}".strip()
+
+
 def _copiar_imagen_manual_a_segmento(carpeta: str, seg_index_1: int, src: str) -> str:
     seg_tag = f"seg_{seg_index_1:02d}"
     dst = os.path.join(carpeta, f"{seg_tag}_chosen")
@@ -1529,6 +1616,14 @@ def generar_video_personalizado(
                                                 
     try:
         yt_title = generar_titulo_youtube(brief, str(plan.get("script_es") or ""))
+                                                  
+        if int(plan.get("target_seconds") or (min_seconds or DEFAULT_CUSTOM_MIN_VIDEO_SEC)) == 60:
+            yt_title = _append_shorts_hashtags_to_title(
+                yt_title,
+                brief=str(plan.get("brief") or brief or "").strip(),
+                script_es=str(plan.get("script_es") or "").strip(),
+                max_total_len=100,
+            )
         plan["youtube_title_es"] = yt_title
     except Exception as e:
         print(f"[CUSTOM] ❌ No se pudo generar título YouTube: {e}")
@@ -1619,7 +1714,198 @@ def renderizar_video_personalizado_desde_plan(carpeta_plan: str, *, voz: str, ve
         print("[CUSTOM] ❌ Plan sin segmentos")
         return False
 
-                                                
+                                                                                                                   
+                                                                                               
+    faltantes: List[int] = []
+    q_falt: List[str] = []
+    n_falt: List[str] = []
+    for i, seg in enumerate(segmentos, start=1):
+        if not isinstance(seg, dict):
+            continue
+        sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg.get("image_selection"), dict) else None
+        rel = (sel or {}).get("path") if isinstance(sel, dict) else None
+        abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep)) if rel else ""
+        if (not rel) or (not _es_imagen_valida(abs_path)):
+            faltantes.append(i)
+            q = (str(seg.get("image_query") or "").strip() or str(seg.get("image_prompt") or "").strip() or str(plan.get("brief") or "").strip())
+            q_falt.append(q or "photo")
+            n_falt.append(str(seg.get("note") or "").strip())
+
+    if faltantes:
+        print(f"[CUSTOM] ℹ️ Faltan imágenes en {len(faltantes)}/{len(segmentos)} segmentos. Intentando autodescarga...")
+        try:
+            _rutas, metas = descargar_mejores_imagenes_ddg(
+                carpeta_plan,
+                q_falt,
+                n_falt,
+                max_per_query=8,
+                segment_numbers=faltantes,
+            )
+            for seg_idx_1, meta in zip(faltantes, metas):
+                if not isinstance(meta, dict):
+                    continue
+                if not isinstance(segmentos[seg_idx_1 - 1], dict):
+                    continue
+                segmentos[seg_idx_1 - 1]["image_selection"] = meta
+            plan["segments"] = segmentos
+            with open(plan_file, "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+            print("[CUSTOM] ✅ Autodescarga completada (revisa candidatos si quieres ajustar)")
+        except Exception as e:
+            print(f"[CUSTOM] ⚠️ Autodescarga falló: {e}")
+
+                                                                                            
+    yt_title = str(plan.get("youtube_title_es") or plan.get("title_es") or "").strip()
+    if not yt_title:
+        b = str(plan.get("brief") or "Video personalizado").strip()
+        yt_title = (b[:77] + "...") if len(b) > 80 else b
+        plan["youtube_title_es"] = yt_title
+        try:
+            with open(plan_file, "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+                                                                          
+    imagenes: List[str] = []
+
+    def _intentar_reparar_seleccion(i_1: int, seg: Dict[str, Any]) -> str | None:
+        \
+        seg_tag = f"seg_{i_1:02d}"
+        for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            cand = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
+            if os.path.exists(cand) and _es_imagen_valida(cand):
+                rel = os.path.relpath(cand, carpeta_plan).replace("\\", "/")
+                q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
+                note = str(seg.get("note") or "").strip()
+                seg["image_selection"] = {
+                    "query": q,
+                    "note": note,
+                    "candidates": [],
+                    "selected": {
+                        "candidate_index": None,
+                        "score": 1,
+                        "url": None,
+                        "title": "recovered",
+                        "path": rel,
+                    },
+                }
+                return cand
+
+        try:
+            nombres = os.listdir(carpeta_plan)
+        except Exception:
+            nombres = []
+        prefix = f"{seg_tag}_cand_"
+        cand_files = sorted([n for n in nombres if n.startswith(prefix)])
+        for n in cand_files:
+            absp = os.path.join(carpeta_plan, n)
+            if not _es_imagen_valida(absp):
+                continue
+            ext = os.path.splitext(absp)[1].lower() or ".jpg"
+            stable = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
+            try:
+                with open(absp, "rb") as src, open(stable, "wb") as dst:
+                    dst.write(src.read())
+            except Exception:
+                stable = absp
+
+            rel = os.path.relpath(stable, carpeta_plan).replace("\\", "/")
+            q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
+            note = str(seg.get("note") or "").strip()
+            seg["image_selection"] = {
+                "query": q,
+                "note": note,
+                "candidates": [],
+                "selected": {
+                    "candidate_index": None,
+                    "score": 1,
+                    "url": None,
+                    "title": "recovered_candidate",
+                    "path": rel,
+                },
+            }
+            return stable
+        return None
+    for i, seg in enumerate(segmentos, start=1):
+        sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
+        rel = (sel or {}).get("path") if isinstance(sel, dict) else None
+        if not rel:
+            if isinstance(seg, dict):
+                _intentar_reparar_seleccion(i, seg)
+                try:
+                    plan["segments"] = segmentos
+                    with open(plan_file, "w", encoding="utf-8") as f:
+                        json.dump(plan, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+                sel = (seg.get("image_selection") or {}).get("selected")
+                rel = (sel or {}).get("path") if isinstance(sel, dict) else None
+            if not rel:
+                print(f"[CUSTOM] ❌ Falta imagen seleccionada para segmento {i}")
+                return False
+        abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep))
+        if not _es_imagen_valida(abs_path):
+            print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
+            return False
+        imagenes.append(abs_path)
+
+                                                       
+    textos = [str(s.get("text_es") or "") for s in segmentos]
+    audios: List[str] = []
+    reuse_ok = True
+    for i in range(len(textos)):
+        p1 = os.path.join(carpeta_plan, f"audio_{i}.mp3")
+        p2 = os.path.join(carpeta_plan, f"audio_{i}.wav")
+        if os.path.exists(p1) and os.path.getsize(p1) > 0:
+            audios.append(p1)
+        elif os.path.exists(p2) and os.path.getsize(p2) > 0:
+            audios.append(p2)
+        else:
+            reuse_ok = False
+            break
+
+    if not reuse_ok:
+        audios = tts.generar_audios(textos, carpeta_plan, voz=voz, velocidad=velocidad)
+        if len(audios) != len(textos):
+            print("[CUSTOM] ❌ No se pudieron generar todos los audios")
+            return False
+
+    duraciones = [max(0.6, audio_duration_seconds(a)) for a in audios]
+
+                                                                          
+    if bool(plan.get("seleccionar_imagenes")):
+        try:
+            img_meta: List[Dict[str, Any]] = []
+            for seg in segmentos:
+                m = seg.get("image_selection") if isinstance(seg, dict) else None
+                if isinstance(m, dict):
+                    img_meta.append(m)
+                else:
+                    q = str((seg or {}).get("image_query") or (seg or {}).get("image_prompt") or "").strip()
+                    note = str((seg or {}).get("note") or "").strip()
+                    img_meta.append({"query": q, "note": note, "candidates": [], "selected": None})
+
+            imagenes, img_meta = _seleccionar_candidatos_interactivo(
+                carpeta_plan,
+                segmentos,
+                imagenes,
+                img_meta,
+                audios,
+                duraciones,
+            )
+
+                                                  
+            for i, seg in enumerate(segmentos):
+                if isinstance(seg, dict) and i < len(img_meta):
+                    seg["image_selection"] = img_meta[i]
+            plan["segments"] = segmentos
+            with open(plan_file, "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[CUSTOM] ⚠️ No se pudo hacer selección manual de candidatos: {e}")
+
+                                                                                              
     n = len(segmentos)
     while True:
         print("\n[CUSTOM] Segmentos y selección actual:")
@@ -1664,54 +1950,6 @@ def renderizar_video_personalizado_desde_plan(carpeta_plan: str, *, voz: str, ve
             print(f"[CUSTOM] ✅ Imagen reemplazada para segmento {idx} (score={score})")
         except Exception as e:
             print(f"[CUSTOM] ❌ No se pudo reemplazar: {e}")
-
-                             
-    try:
-        brief = str(plan.get("brief") or "").strip()
-        script = str(plan.get("script_es") or "").strip()
-        plan["youtube_title_es"] = generar_titulo_youtube(brief, script)
-        with open(plan_file, "w", encoding="utf-8") as f:
-            json.dump(plan, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[CUSTOM] ❌ No se pudo generar título YouTube: {e}")
-        return False
-
-                                    
-    imagenes: List[str] = []
-    for i, seg in enumerate(segmentos, start=1):
-        sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
-        rel = (sel or {}).get("path") if isinstance(sel, dict) else None
-        if not rel:
-            print(f"[CUSTOM] ❌ Falta imagen seleccionada para segmento {i}")
-            return False
-        abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep))
-        if not _es_imagen_valida(abs_path):
-            print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
-            return False
-        imagenes.append(abs_path)
-
-                                                       
-    textos = [str(s.get("text_es") or "") for s in segmentos]
-    audios: List[str] = []
-    reuse_ok = True
-    for i in range(len(textos)):
-        p1 = os.path.join(carpeta_plan, f"audio_{i}.mp3")
-        p2 = os.path.join(carpeta_plan, f"audio_{i}.wav")
-        if os.path.exists(p1) and os.path.getsize(p1) > 0:
-            audios.append(p1)
-        elif os.path.exists(p2) and os.path.getsize(p2) > 0:
-            audios.append(p2)
-        else:
-            reuse_ok = False
-            break
-
-    if not reuse_ok:
-        audios = tts.generar_audios(textos, carpeta_plan, voz=voz, velocidad=velocidad)
-        if len(audios) != len(textos):
-            print("[CUSTOM] ❌ No se pudieron generar todos los audios")
-            return False
-
-    duraciones = [max(0.6, audio_duration_seconds(a)) for a in audios]
     timeline = []
     pos = 0.0
     for q, d in zip([str(s.get("image_query") or s.get("image_prompt") or "") for s in segmentos], duraciones):

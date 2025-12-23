@@ -49,6 +49,57 @@ def _pedir_entero(mensaje: str, *, minimo: int = 1, default: int = 1) -> int:
         return default
 
 
+def _parse_indices_csv(raw: str, *, max_index: int) -> list[int]:
+    \
+\
+\
+\
+\
+\
+\
+\
+    raw = (raw or "").strip()
+    if not raw:
+        return []
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    out: list[int] = []
+    seen = set()
+    for p in parts:
+                        
+        if "-" in p:
+            a_raw, b_raw = [x.strip() for x in p.split("-", 1)]
+            try:
+                a = int(a_raw)
+                b = int(b_raw)
+            except Exception:
+                continue
+            if a <= 0 or b <= 0:
+                continue
+            start = min(a, b)
+            end = max(a, b)
+            for i in range(start, end + 1):
+                if i < 1 or i > int(max_index):
+                    continue
+                if i in seen:
+                    continue
+                seen.add(i)
+                out.append(i)
+            continue
+
+                           
+        try:
+            i = int(p)
+        except Exception:
+            continue
+        if i < 1 or i > int(max_index):
+            continue
+        if i in seen:
+            continue
+        seen.add(i)
+        out.append(i)
+    return out
+
+
 def _estimar_segundos(texto: str) -> float:
     palabras = len((texto or "").split())
     if palabras <= 0:
@@ -497,22 +548,55 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     if accion == "4":
-        brief = input("Tema/brief para video personalizado (usar imágenes reales de internet): ").strip()
-        dur_opt = input("Duración mínima (1=1 minuto, 2=5 minutos) [1]: ").strip()
+        total_custom = _pedir_entero("¿Cuántos videos personalizados quieres crear?: ", minimo=1, default=1)
+        dur_opt = input("Duración mínima para TODOS (1=1 minuto, 2=5 minutos) [1]: ").strip()
         min_seconds = 60 if dur_opt != "2" else 300
-        sel_opt = input("¿Quieres elegir manualmente las imágenes antes del render? (s/N): ").strip().lower()
-        seleccionar_imagenes = sel_opt == "s"
-        try:
-            ok = custom_video.generar_video_personalizado(
-                brief,
-                voz=VOZ,
-                velocidad=VELOCIDAD,
-                min_seconds=min_seconds,
-                seleccionar_imagenes=seleccionar_imagenes,
-            )
-            print("[MAIN] Resultado:", "✅ Exito" if ok else "❌ Falló")
-        except Exception as e:
-            print(f"[MAIN] ⚠️ Error en video personalizado: {e}")
+
+                                                                           
+        briefs: list[str] = []
+        seleccionar_flags: list[bool] = []
+
+        print("\n[MAIN] Ingresa los prompts de cada historia (luego comenzará el render).")
+        for i in range(1, total_custom + 1):
+            while True:
+                brief = input(f"Prompt/Tema para la historia {i}/{total_custom}: ").strip()
+                if brief:
+                    break
+                print("[MAIN] ⚠️ El prompt no puede estar vacío.")
+
+            sel_opt = input(f"¿Quieres elegir manualmente las imágenes para historia {i}/{total_custom}? (s/N): ").strip().lower()
+            seleccionar_imagenes = sel_opt == "s"
+
+            briefs.append(brief)
+            seleccionar_flags.append(seleccionar_imagenes)
+
+        print("\n[MAIN] Fase 1: generando SOLO guiones/planes (sin imágenes, sin render)...")
+        creados = 0
+        for i, (brief, seleccionar_imagenes) in enumerate(zip(briefs, seleccionar_flags), start=1):
+            try:
+                carpeta = custom_video.generar_guion_personalizado_a_plan(
+                    brief,
+                    min_seconds=min_seconds,
+                    seleccionar_imagenes=seleccionar_imagenes,
+                )
+                if carpeta:
+                    creados += 1
+                    print(f"[MAIN] ✅ Plan creado {i}/{total_custom}: {carpeta}")
+                else:
+                    print(f"[MAIN] ❌ No se pudo crear plan {i}/{total_custom}")
+            except Exception as e:
+                print(f"[MAIN] ⚠️ Error creando plan (historia {i}/{total_custom}): {e}")
+
+        print(f"[MAIN] Planes creados: {creados}/{total_custom}")
+        descargar = input("¿Quieres intentar descargar el modelo de texto para liberar VRAM? (s/N): ").strip().lower()
+        if descargar == "s":
+            try:
+                ok = custom_video.intentar_descargar_modelo_texto()
+                print("[MAIN] Unload modelo texto:", "✅ OK" if ok else "❌ No se pudo / no aplica")
+            except Exception as e:
+                print(f"[MAIN] ⚠️ No se pudo intentar unload: {e}")
+
+        print("[MAIN] Ahora usa la opción 5 para Fase 2 (imágenes+render) desde el plan.")
         raise SystemExit(0)
 
     if accion == "5":
@@ -521,21 +605,58 @@ if __name__ == "__main__":
             print("\n[MAIN] Planes personalizados disponibles:")
             for i, p in enumerate(planes, start=1):
                 print(f"  {i}. {p}")
-            idx = _pedir_entero("Selecciona número de plan: ", minimo=1, default=1)
-            idx = max(1, min(idx, len(planes)))
-            ruta = planes[idx - 1]
+
+            total_renders = _pedir_entero("¿Cuántos renders quieres hacer?: ", minimo=1, default=1)
+            sel_raw = input("Selecciona planes (ej: 1,2,3) [1]: ").strip()
+            seleccion = _parse_indices_csv(sel_raw, max_index=len(planes))
+            if not seleccion:
+                seleccion = [1]
+
+                                                                                           
+            if total_renders > len(seleccion):
+                for j in range(1, len(planes) + 1):
+                    if j in seleccion:
+                        continue
+                    seleccion.append(j)
+                    if len(seleccion) >= total_renders:
+                        break
+
+                                                                 
+            seleccion = seleccion[:total_renders]
+
+            exitos = 0
+            for k, idx in enumerate(seleccion, start=1):
+                ruta = planes[idx - 1]
+                try:
+                    ok = custom_video.renderizar_video_personalizado_desde_plan(ruta, voz=VOZ, velocidad=VELOCIDAD)
+                    if ok:
+                        exitos += 1
+                    print(f"[MAIN] Render {k}/{len(seleccion)} (plan {idx}):", "✅ Exito" if ok else "❌ Falló")
+                except Exception as e:
+                    print(f"[MAIN] ⚠️ Error renderizando (plan {idx}): {e}")
+
+            print(f"[MAIN] Renders completados: {exitos}/{len(seleccion)}")
+            raise SystemExit(0)
         else:
-            ruta = input("Ruta de carpeta (output/custom_... ) o archivo custom_plan.json: ").strip().strip('"')
-            if not ruta:
+            raw = input("Rutas (separadas por coma) de carpeta output/custom_... o custom_plan.json: ").strip().strip('"')
+            if not raw:
                 print("[MAIN] No se indicó ruta")
                 raise SystemExit(0)
 
-        try:
-            ok = custom_video.renderizar_video_personalizado_desde_plan(ruta, voz=VOZ, velocidad=VELOCIDAD)
-            print("[MAIN] Resultado:", "✅ Exito" if ok else "❌ Falló")
-        except Exception as e:
-            print(f"[MAIN] ⚠️ Error renderizando: {e}")
-        raise SystemExit(0)
+            rutas = [r.strip().strip('"') for r in raw.split(",") if r.strip().strip('"')]
+            total_renders = len(rutas)
+            exitos = 0
+            for i, ruta in enumerate(rutas, start=1):
+                try:
+                    ok = custom_video.renderizar_video_personalizado_desde_plan(ruta, voz=VOZ, velocidad=VELOCIDAD)
+                    if ok:
+                        exitos += 1
+                    print(f"[MAIN] Render {i}/{total_renders}:", "✅ Exito" if ok else "❌ Falló")
+                except Exception as e:
+                    print(f"[MAIN] ⚠️ Error renderizando ({ruta}): {e}")
+
+            print(f"[MAIN] Renders completados: {exitos}/{total_renders}")
+            raise SystemExit(0)
 
                     
     fase = _pedir_entero("Selecciona fase (1=plan, 2=render pendientes): ", minimo=1, default=2)
