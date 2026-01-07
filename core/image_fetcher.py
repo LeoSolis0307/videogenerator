@@ -17,10 +17,13 @@ COMFY_PROMPT_FIELD = os.environ.get("COMFYUI_PROMPT_FIELD", "text")
 COMFY_SAVE_NODE_ID = os.environ.get("COMFYUI_SAVE_NODE_ID", "2")
 COMFY_TIMEOUT = int(os.environ.get("COMFYUI_TIMEOUT", "800"))
 
-                                                                   
+                                                                    
 OLLAMA_URL = (os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate") or "http://localhost:11434/api/generate").strip()
-OLLAMA_MODEL = (os.environ.get("OLLAMA_MODEL", "llama3.1") or "llama3.1").strip()
+                                                             
+OLLAMA_TEXT_MODEL = (os.environ.get("OLLAMA_TEXT_MODEL") or "gemma2:9b").strip() or "gemma2:9b"
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
+                                                                            
+OLLAMA_TEXT_NUM_CTX_DEFAULT = int((os.environ.get("OLLAMA_TEXT_NUM_CTX") or os.environ.get("OLLAMA_NUM_CTX") or "2048").strip() or "2048")
 
                                                                 
                                                     
@@ -49,14 +52,18 @@ PROMPTS = [
 
 
 def _ollama_generar_json(prompt: str) -> dict:
+    extra = _ollama_extra_options()
     options = {
         "temperature": 0.65,
         "num_predict": 700,
     }
-    options.update(_ollama_extra_options())
+                                                                                                  
+    if "num_ctx" not in extra:
+        options["num_ctx"] = max(256, int(OLLAMA_TEXT_NUM_CTX_DEFAULT))
+    options.update(extra)
 
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": OLLAMA_TEXT_MODEL,
         "prompt": prompt,
         "stream": False,
         "options": options,
@@ -94,7 +101,7 @@ def generar_prompts_historia(historia: str, *, max_prompts: int = 12) -> list[st
             if limpios:
                 return limpios[:max_prompts]
     except Exception as e:
-        print(f"[IMG] ⚠️ Llama no devolvió prompts: {e}")
+        print(f"[IMG] ⚠️ Ollama no devolvió prompts: {e}")
         return []
 
 

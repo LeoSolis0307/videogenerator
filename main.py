@@ -6,6 +6,7 @@ import re
 import shutil
 
 from core import custom_video, image_downloader, reddit_scraper, story_generator, text_processor, tts
+from core import topic_db
 from core.video_renderer import (
     append_intro_to_video,
     audio_duration_seconds,
@@ -16,6 +17,8 @@ from core.video_renderer import (
     select_video_base,
 )
 from utils.fs import crear_carpeta_proyecto, guardar_historial
+from utils import topic_file
+from utils import topic_importer
 
 
                                                    
@@ -521,7 +524,87 @@ def _generar_video(usar_video_base: bool, indice: int, total: int, *, usar_histo
 
 if __name__ == "__main__":
     print("[MAIN] Iniciando proceso")
-    accion = input("¿Qué deseas hacer? (1 = Videos, 2 = Textos, 3 = Imagen de prueba, 4 = Video personalizado, 5 = Renderizar personalizado): ").strip()
+
+                                                                             
+    try:
+        topic_file.ensure_topics_file(topic_file.TOPICS_FILE_DEFAULT)
+        disponibles = topic_file.load_topics_available_with_flags(topic_file.TOPICS_FILE_DEFAULT)
+        print(f"[MAIN] Temas disponibles (archivo): {len(disponibles)} -> {topic_file.TOPICS_FILE_DEFAULT}")
+    except Exception as e:
+        print(f"[MAIN] ⚠️ No se pudo leer temas_custom.txt: {e}")
+
+                                                                             
+                                                                                                     
+    text_model = getattr(custom_video, "OLLAMA_TEXT_MODEL", "") or "(desconocido)"
+    vision_model = (os.environ.get("VISION_MODEL") or "minicpm-v:latest").strip() or "minicpm-v:latest"
+    ollama_url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434/api/generate").strip()
+    print(f"[MAIN] Modelo texto: {text_model} (OLLAMA_TEXT_MODEL/OLLAMA_MODEL o default)")
+    print(f"[MAIN] Modelo visión: {vision_model} (env VISION_MODEL)")
+    print(f"[MAIN] Ollama URL: {ollama_url} (env OLLAMA_URL)")
+
+    accion = input(
+        "¿Qué deseas hacer? (1 = Videos, 2 = Textos, 3 = Imagen de prueba, 4 = Video personalizado, 5 = Renderizar personalizado, 6 = Importar temas): "
+    ).strip()
+
+    if accion == "6":
+        print("\n[MAIN] Importar temas a storage/temas_custom.txt")
+        modo = input("Fuente (1=pegar texto, 2=archivo .txt) [1]: ").strip()
+        blob = ""
+        if modo == "2":
+            ruta = input("Ruta del archivo .txt: ").strip().strip('"')
+            if not ruta or not os.path.exists(ruta):
+                print("[MAIN] Ruta inválida")
+                raise SystemExit(0)
+            try:
+                with open(ruta, "r", encoding="utf-8") as f:
+                    blob = f.read()
+            except Exception as e:
+                print(f"[MAIN] No se pudo leer archivo: {e}")
+                raise SystemExit(0)
+        else:
+            print("Pega el texto (multi-línea). Escribe END en una línea sola para terminar:")
+            lines: list[str] = []
+            while True:
+                try:
+                    line = input()
+                except EOFError:
+                    break
+                if line.strip() == "END":
+                    break
+                lines.append(line)
+            blob = "\n".join(lines)
+
+        prompts = topic_importer.parse_prompts_from_blob(blob)
+        if not prompts:
+            print("[MAIN] No se encontraron prompts.")
+            raise SystemExit(0)
+
+        aceptados, descartados = topic_importer.dedupe_prompts(prompts, topics_path=topic_file.TOPICS_FILE_DEFAULT)
+
+        if aceptados:
+            topic_file.append_topics([(p, False) for p in aceptados], path=topic_file.TOPICS_FILE_DEFAULT)
+
+        print(f"\n[MAIN] Agregados: {len(aceptados)}")
+        for i, p in enumerate(aceptados, start=1):
+            print(f"  + {i}. {p[:120]}")
+
+        print(f"\n[MAIN] Descartados: {len(descartados)}")
+        for i, (p, motivo) in enumerate(descartados, start=1):
+            print(f"  - {i}. ({motivo}) {p[:120]}")
+
+        if descartados:
+            sel = input(
+                "\n¿Quieres agregar alguno de los descartados de todos modos? (ej: 1,3,5 | Enter=skip): "
+            ).strip()
+            if sel:
+                idxs = _parse_indices_csv(sel, max_index=len(descartados))
+                if idxs:
+                    force = [(descartados[i - 1][0], True) for i in idxs]
+                    topic_file.append_topics(force, path=topic_file.TOPICS_FILE_DEFAULT)
+                    print(f"[MAIN] Forzados agregados: {len(force)} (con prefijo '!')")
+
+        print(f"\n[MAIN] Listo. Archivo: {topic_file.TOPICS_FILE_DEFAULT}")
+        raise SystemExit(0)
 
     if accion == "2":
         total_textos = _pedir_entero("¿Cuántas historias generar?: ", minimo=1, default=1)
@@ -548,31 +631,119 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     if accion == "4":
-        total_custom = _pedir_entero("¿Cuántos videos personalizados quieres crear?: ", minimo=1, default=1)
+        origen_temas = input("Temas (1=escribir, 2=archivo storage/temas_custom.txt) [1]: ").strip()
+
+        temas_path = topic_file.TOPICS_FILE_DEFAULT
+        temas_disponibles: list[tuple[str, bool]] = []
+        if origen_temas == "2":
+            topic_file.ensure_topics_file(temas_path)
+            temas_disponibles = topic_file.load_topics_available_with_flags(temas_path)
+            if not temas_disponibles:
+                print(f"[MAIN] No hay temas disponibles en {temas_path} (sin prefijo '0').")
+                print("[MAIN] Agrega 1 tema por línea en el archivo y vuelve a intentar.")
+                raise SystemExit(0)
+            max_n = len(temas_disponibles)
+            total_custom = _pedir_entero(f"¿Cuántos videos sacar del archivo? (max {max_n}): ", minimo=1, default=1)
+            total_custom = min(total_custom, max_n)
+        else:
+            total_custom = _pedir_entero("¿Cuántos videos personalizados quieres crear?: ", minimo=1, default=1)
+
         dur_opt = input("Duración mínima para TODOS (1=1 minuto, 2=5 minutos) [1]: ").strip()
         min_seconds = 60 if dur_opt != "2" else 300
 
                                                                            
         briefs: list[str] = []
         seleccionar_flags: list[bool] = []
+        brief_topic_files: list[str | None] = []
 
-        print("\n[MAIN] Ingresa los prompts de cada historia (luego comenzará el render).")
-        for i in range(1, total_custom + 1):
-            while True:
-                brief = input(f"Prompt/Tema para la historia {i}/{total_custom}: ").strip()
-                if brief:
+        def _tema_repetido(brief: str) -> bool:
+            try:
+                                                                         
+                match = topic_db.find_similar_topic(brief, kinds=("custom", "custom_pending"))
+            except Exception as e:
+                print(f"[MAIN] ⚠️ No se pudo validar tema en DB: {e}")
+                match = None
+            if match is None:
+                return False
+            print(
+                "[MAIN] ⚠️ Tema repetido detectado. "
+                f"(sim={match.similarity:.2f}) Ya existe algo muy parecido: '{match.brief[:120]}'"
+            )
+            return True
+
+        print("\n[MAIN] Selección de temas...")
+        if origen_temas == "2":
+                                                                              
+            i = 0
+            for tema, forced in temas_disponibles:
+                if len(briefs) >= total_custom:
                     break
-                print("[MAIN] ⚠️ El prompt no puede estar vacío.")
+                i += 1
+                brief = (tema or "").strip()
+                if not brief:
+                    continue
+                if not forced and _tema_repetido(brief):
+                    print(f"[MAIN] Saltando tema del archivo por repetido: {brief[:120]}")
+                    continue
 
-            sel_opt = input(f"¿Quieres elegir manualmente las imágenes para historia {i}/{total_custom}? (s/N): ").strip().lower()
-            seleccionar_imagenes = sel_opt == "s"
+                sel_opt = input(
+                    f"¿Quieres elegir manualmente las imágenes para historia {len(briefs)+1}/{total_custom}? (s/N): "
+                ).strip().lower()
+                seleccionar_imagenes = sel_opt == "s"
 
-            briefs.append(brief)
-            seleccionar_flags.append(seleccionar_imagenes)
+                briefs.append(brief)
+                seleccionar_flags.append(seleccionar_imagenes)
+                brief_topic_files.append(temas_path)
+
+            if len(briefs) < total_custom:
+                print(
+                    f"[MAIN] ⚠️ Solo se pudieron tomar {len(briefs)}/{total_custom} temas del archivo "
+                    "(los demás se saltaron por repetidos)."
+                )
+                if not briefs:
+                    raise SystemExit(0)
+        else:
+            print("[MAIN] Ingresa los prompts de cada historia (luego comenzará el render).")
+            for i in range(1, total_custom + 1):
+                while True:
+                    brief = input(f"Prompt/Tema para la historia {i}/{total_custom}: ").strip()
+                    if not brief:
+                        print("[MAIN] ⚠️ El prompt no puede estar vacío.")
+                        continue
+                    if _tema_repetido(brief):
+                        print("[MAIN] Escribe otro tema para evitar repetir videos.")
+                        continue
+                    break
+
+                sel_opt = input(
+                    f"¿Quieres elegir manualmente las imágenes para historia {i}/{total_custom}? (s/N): "
+                ).strip().lower()
+                seleccionar_imagenes = sel_opt == "s"
+
+                briefs.append(brief)
+                seleccionar_flags.append(seleccionar_imagenes)
+                brief_topic_files.append(None)
 
         print("\n[MAIN] Fase 1: generando SOLO guiones/planes (sin imágenes, sin render)...")
+
+                                                                                 
+        try:
+            if not custom_video.check_text_llm_ready():
+                print("[MAIN] ❌ Abortando Fase 1: el LLM de texto no está disponible en Ollama.")
+                print("[MAIN] 💡 Tip (Gemma 2): instala uno más liviano y úsalo para guiones:")
+                print("[MAIN]   - `ollama pull gemma2:2b`  (recomendado para PCs con poca RAM)")
+                print("[MAIN]   - `setx OLLAMA_TEXT_MODEL gemma2:2b`  (abre una nueva terminal luego)")
+                raise SystemExit(1)
+        except SystemExit:
+            raise
+        except Exception as e:
+            print(f"[MAIN] ❌ Abortando Fase 1: fallo el preflight de Ollama: {e}")
+            raise SystemExit(1)
+
         creados = 0
-        for i, (brief, seleccionar_imagenes) in enumerate(zip(briefs, seleccionar_flags), start=1):
+        for i, (brief, seleccionar_imagenes, tema_file) in enumerate(
+            zip(briefs, seleccionar_flags, brief_topic_files), start=1
+        ):
             try:
                 carpeta = custom_video.generar_guion_personalizado_a_plan(
                     brief,
@@ -580,6 +751,27 @@ if __name__ == "__main__":
                     seleccionar_imagenes=seleccionar_imagenes,
                 )
                 if carpeta:
+                                                                                                
+                    try:
+                        topic_db.register_topic_if_new(brief, kind="custom_pending", plan_dir=carpeta, threshold=0.90)
+                    except Exception as e:
+                        print(f"[MAIN] ⚠️ No se pudo registrar tema pendiente en DB: {e}")
+
+                                                                                
+                    try:
+                        plan_path = os.path.join(carpeta, "custom_plan.json")
+                        if os.path.exists(plan_path):
+                            with open(plan_path, "r", encoding="utf-8") as f:
+                                plan = json.load(f) or {}
+                            if tema_file:
+                                plan["topic_source"] = "file"
+                                plan["topic_file"] = tema_file
+                            else:
+                                plan["topic_source"] = "manual"
+                            with open(plan_path, "w", encoding="utf-8") as f:
+                                json.dump(plan, f, ensure_ascii=False, indent=2)
+                    except Exception as e:
+                        print(f"[MAIN] ⚠️ No se pudo guardar metadata del tema: {e}")
                     creados += 1
                     print(f"[MAIN] ✅ Plan creado {i}/{total_custom}: {carpeta}")
                 else:
@@ -628,9 +820,46 @@ if __name__ == "__main__":
             for k, idx in enumerate(seleccion, start=1):
                 ruta = planes[idx - 1]
                 try:
-                    ok = custom_video.renderizar_video_personalizado_desde_plan(ruta, voz=VOZ, velocidad=VELOCIDAD)
+                    ok = custom_video.renderizar_video_personalizado_desde_plan(
+                        ruta,
+                        voz=VOZ,
+                        velocidad=VELOCIDAD,
+                        interactive=(len(seleccion) <= 1),
+                    )
                     if ok:
                         exitos += 1
+
+                                                                                              
+                                                                          
+                        try:
+                            plan_path = os.path.join(ruta, "custom_plan.json")
+                            if os.path.exists(plan_path):
+                                with open(plan_path, "r", encoding="utf-8") as f:
+                                    plan = json.load(f) or {}
+                                brief = str(plan.get("brief") or "").strip()
+                                topic_source = str(plan.get("topic_source") or "").strip().lower()
+                                topic_file_path = str(plan.get("topic_file") or "").strip()
+
+                                                                                  
+                                if brief:
+                                    topic_db.register_topic_if_new(
+                                        brief,
+                                        kind="custom",
+                                        plan_dir=ruta,
+                                        threshold=0.98,
+                                    )
+                                                           
+                                try:
+                                    topic_db.delete_by_plan_dir(ruta, kind="custom_pending")
+                                except Exception:
+                                    pass
+
+                                if topic_source == "file" and topic_file_path and brief:
+                                    marcado = topic_file.mark_topic_used(brief, topic_file_path)
+                                    if marcado:
+                                        print("[MAIN] ✅ Tema marcado como usado en archivo.")
+                        except Exception as e:
+                            print(f"[MAIN] ⚠️ No se pudo finalizar tema (DB/archivo): {e}")
                     print(f"[MAIN] Render {k}/{len(seleccion)} (plan {idx}):", "✅ Exito" if ok else "❌ Falló")
                 except Exception as e:
                     print(f"[MAIN] ⚠️ Error renderizando (plan {idx}): {e}")
@@ -648,7 +877,12 @@ if __name__ == "__main__":
             exitos = 0
             for i, ruta in enumerate(rutas, start=1):
                 try:
-                    ok = custom_video.renderizar_video_personalizado_desde_plan(ruta, voz=VOZ, velocidad=VELOCIDAD)
+                    ok = custom_video.renderizar_video_personalizado_desde_plan(
+                        ruta,
+                        voz=VOZ,
+                        velocidad=VELOCIDAD,
+                        interactive=(len(rutas) <= 1),
+                    )
                     if ok:
                         exitos += 1
                     print(f"[MAIN] Render {i}/{total_renders}:", "✅ Exito" if ok else "❌ Falló")

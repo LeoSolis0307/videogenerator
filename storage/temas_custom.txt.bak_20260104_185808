@@ -1,0 +1,47 @@
+# Temas/prompt para videos personalizados (uno por línea)
+# - Para marcar un tema como usado, el sistema le pondrá prefijo "0 " cuando el video termine OK.
+# - Prefijo "! " = forzar uso aunque sea repetido (se saltará el bloqueo por DB).
+
+Escribe un guion para YouTube Short sobre "El origen de Nagini". Tono: Trágico. Datos: 1. Nagini no era una serpiente común, era una mujer con una maldición de sangre (Maledictus).
+Escribe un guion para YouTube Short sobre "Los Thestrals". Tono: Gótico. Datos: 1. Son caballos esqueléticos carnívoros invisibles para la mayoría.
+Escribe un guion para YouTube Short sobre "El Vidriagón". Tono: Informativo. Datos: 1. Es vidrio volcánico natural, pero los Valyrios lo llamaban 'fuego helado'.
+Escribe un guion para YouTube Short sobre "Los Huevos de Dragón". Tono: Místico. Datos: 1. Se creía que estaban petrificados por el tiempo.
+Escribe un guion para YouTube Short comparando "Sauron vs Voldemort". Tono: Debate Geek. Datos: 1. Voldemort quiere dominar la muerte; Sauron es un ser inmortal divino (Maia).
+Escribe un guion para YouTube Short sobre "El origen del Código QR". Tono: Tech. Datos: 1. Fue inventado por Denso Wave para rastrear piezas de autos en fábricas de Toyota.
+Escribe un guion para YouTube Short sobre "La Ley de Moore". Tono: Educativo. Datos: 1. Predice que la potencia de los procesadores se duplica cada dos años.
+Escribe un guion para YouTube Short sobre "Turritopsis dohrnii". Tono: Asombro. Datos: 1. Es una medusa que biológicamente no muere de vejez.
+Escribe un guion para YouTube Short sobre "La Materia Oscura". Tono: Misterio Cósmico. Datos: 1. El 85% del universo está hecho de algo que no podemos ver ni tocar.
+Escribe un guion para YouTube Short sobre "El Axolote". Tono: Interesante. Datos: 1. Es el rey de la regeneración: puede volver a crear extremidades, corazón y hasta partes del cerebro.
+Escribe un guion para YouTube Short sobre "Por qué las motos no se caen". Tono: Física Aplicada. Datos: 1. A alta velocidad, las ruedas actúan como giroscopios gigantes resistiendo el cambio de posición.
+Escribe un guion para YouTube Short sobre "La caducidad de los cascos". Tono: Seguridad. Datos: 1. Los cascos sí tienen fecha de caducidad (aprox 5 años).
+Escribe un guion para YouTube Short sobre "Mike Tyson y Cus D'Amato". Tono: Psicológico. Datos: 1. Su entrenador Cus D'Amato usaba hipnosis y afirmaciones para quitarle el miedo.
+Escribe un guion para YouTube Short sobre "La niebla de Silent Hill". Tono: Curiosidad Técnica. Datos: 1. La famosa niebla no fue una decisión artística al principio.
+Escribe un guion para YouTube Short sobre "El Nivel 256 de Pac-Man". Tono: Glitch. Datos: 1. Pac-Man no estaba programado para terminar nunca.
+Escribe un guion para YouTube Short sobre "La cicatriz de Dumbledore". Tono: Curioso. Datos: 1. Dumbledore dice tener una cicatriz arriba de la rodilla izquierda.
+Escribe un guion para YouTube Short sobre "El Autobús Noctámbulo". Tono: Caótico y Divertido. Datos: 1. Aparece cuando un mago saca su varita en la calle por desesperación.
+Escribe un guion para YouTube Short sobre "La fontanería de la Cámara de los Secretos". Tono: Curiosidad Histórica. Datos: 1. Originalmente la entrada era una trampilla oculta, no un baño.
+Escribe un guion para YouTube Short sobre "La inspiración real de la Boda Roja". Tono: Histórico y Sangriento. Datos: 1. Se basa en la 'Cena Negra' de Escocia de 1440.
+Escribe un guion para YouTube Short sobre "La Maldición de Valyria". Tono: Apocalíptico. Datos: 1. Era la civilización más avanzada hasta que sus 14 volcanes entraron en erupción a la vez.
+Escribe un guion para YouTube Short sobre "El primer bug informático". Tono: Anecdótico. Datos: 1. En 1947, Grace Hopper encontró una polilla real atrapada en un relé de la Mark II.
+Escribe un guion para YouTube Short sobre "La Pantalla Azul de la Muerte". Tono: Curioso. Datos: 1. El texto original de Windows 3.1 fue escrito por Steve Ballmer (ex CEO).
+Escribe un guion para YouTube Short sobre "Qué significa CAPTCHA". Tono: Revelación. Datos: 1. Significa 'Prueba de Turing pública y automática para diferenciar computadoras y humanos'.
+Escribe un guion para YouTube Short sobre "El Núcleo del Demonio". Tono: Suspenso/Peligro. Datos: 1. Era una esfera de plutonio de 6kg destinada a una tercera bomba atómica en la SGM.
+Escribe un guion para YouTube Short sobre "El Gran Atractor". Tono: Terror Espacial. Datos: 1. Algo gigantesco está arrastrando a nuestra galaxia (y a miles más) hacia un punto en el espacio.
+Escribe un guion para YouTube Short sobre "La Kawasaki H2 Mach IV de 1972". Tono: Adrenalina. Datos: 1. Fue apodada la 'Hacedora de Viudas' (Widowmaker).
+Escribe un guion para YouTube Short sobre "La Fibra de Carbono en motos". Tono: Ingeniería. Datos: 1. Es 5 veces más fuerte que el acero y mucho más ligera.
+Escribe un guion para YouTube Short sobre "Guantes de Boxeo vs Puño Limpio". Tono: Contraintuitivo. Datos: 1. Los guantes no protegen la cabeza del oponente, protegen las manos del pegador.
+Escribe un guion para YouTube Short sobre "El Golpe Fantasma de Ali". Tono: Misterio Deportivo. Datos: 1. Muhammad Ali noqueó a Sonny Liston en el primer round con un golpe que nadie vio.
+Escribe un guion para YouTube Short sobre "El juego de ET de Atari". Tono: Fracaso Épico. Datos: 1. Fue tan malo que causó la crisis de los videojuegos de 1983.
+Escribe un guion para YouTube Short sobre "El Código de Matrix". Tono: Curioso y Divertido. Datos: 1. La famosa lluvia de código verde no son algoritmos complejos.
+Escribe un guion para YouTube Short sobre los "Sables de Luz". Tono: Épico y Sci-Fi. Datos: 1. El color del sable depende de la conexión del Jedi con el cristal Kyber.
+Escribe un guion para YouTube Short sobre "El Origen del Creeper". Tono: Gamer y Tech. Datos: 1. No fue diseñado a propósito, fue un error de código.
+Escribe un guion para YouTube Short sobre "Lluvia de Diamantes en Neptuno". Tono: Asombroso. Datos: 1. En Neptuno y Urano la presión es tan alta que comprime el carbono del aire.
+Escribe un guion para YouTube Short sobre "La Pata de Elefante". Tono: Terror Real y Radioactivo. Datos: 1. Es una masa de corium radiactivo formada tras el accidente de Chernóbil.
+Escribe un guion para YouTube Short sobre "La Guerra de los Emúes". Tono: Humorístico e Histórico. Datos: 1. En 1932, Australia declaró la guerra a los emúes porque se comían los cultivos.
+Escribe un guion para YouTube Short sobre "La Plaga del Baile de 1518". Tono: Extraño y Misterioso. Datos: 1. Cientos de personas en Estrasburgo empezaron a bailar sin control durante días.
+Escribe un guion para YouTube Short sobre "Dispositivos que corren Doom". Tono: Geek y Divertido. Datos: 1. El juego Doom (1993) ha sido portado a casi cualquier cosa con pantalla.
+Escribe un guion para YouTube Short sobre la sonda "Voyager 1". Tono: Nostálgico y Cósmico. Datos: 1. Es el objeto humano más lejano de la Tierra, ya en el espacio interestelar.
+Escribe un guion para YouTube Short sobre el "Hongo Cordyceps". Tono: Terror Biológico (Estilo The Last of Us). Datos: 1. Es un hongo real que infecta hormigas y controla su cerebro.
+Escribe un guion para YouTube Short sobre "El Origen del nombre Bluetooth". Tono: Curiosidad Histórica. Datos: 1. Se llama así por el rey vikingo Harald Bluetooth, que unificó las tribus de Dinamarca y Noruega.
+Escribe un guion para YouTube Short sobre "El Velo del Departamento de Misterios". Tono: Tétrico y Misterioso. Datos: 1. Es un arco de piedra antiguo que ya estaba ahí antes de que se construyera el Ministerio.
+Escribe un guion para YouTube Short sobre "El Valle Inquietante". Tono: Psicológico y Perturbador. Datos: 1. Es la teoría de que nos gustan los robots hasta que se parecen *demasiado* a un humano, entonces nos causan repulsión.

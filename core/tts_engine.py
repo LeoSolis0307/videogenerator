@@ -28,6 +28,12 @@ VELOCIDAD_WPM_POR_DEFECTO = 200
                                           
 VELOCIDAD_EDGE = "-20%"
 
+                                                    
+                                                                                                                
+                                                                
+EDGE_TTS_STYLE = (os.environ.get("EDGE_TTS_STYLE") or "").strip()
+EDGE_TTS_STYLE_DEGREE = (os.environ.get("EDGE_TTS_STYLE_DEGREE") or "").strip()
+
 
 def _parece_voz_edge(voz: str | None) -> bool:
     if not voz:
@@ -104,6 +110,55 @@ def _split_text(texto: str, max_chars: int = 500) -> list[str]:
             for i in range(0, len(c), max_chars):
                 final.append(c[i : i + max_chars])
     return final
+
+
+def _xml_escape(s: str) -> str:
+    s = (s or "")
+    s = s.replace("&", "&amp;")
+    s = s.replace("<", "&lt;")
+    s = s.replace(">", "&gt;")
+    s = s.replace('"', "&quot;")
+    s = s.replace("'", "&apos;")
+    return s
+
+
+def _build_edge_ssml(*, text: str, voice: str, style: str, style_degree: str | None = None) -> str:
+    \
+\
+\
+\
+    v = (voice or "").strip()
+    st = (style or "").strip()
+    deg = (style_degree or "").strip()
+    if not v or not st:
+        return (text or "").strip()
+
+                                                                    
+    lang = "es-MX"
+    try:
+        if "-" in v:
+            parts = v.split("-")
+            if len(parts) >= 2:
+                lang = parts[0] + "-" + parts[1]
+    except Exception:
+        pass
+
+    escaped = _xml_escape((text or "").strip())
+    attrs = f' style="{_xml_escape(st)}"'
+    if deg:
+                                                                           
+        attrs += f' styledegree="{_xml_escape(deg)}"'
+
+    return (
+        f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        f'xmlns:mstts="http://www.w3.org/2001/mstts" xml:lang="{_xml_escape(lang)}">'
+        f'<voice name="{_xml_escape(v)}">'
+        f'<mstts:express-as{attrs}>'
+        f'{escaped}'
+        f'</mstts:express-as>'
+        f'</voice>'
+        f'</speak>'
+    )
 
 
 def _concat_wavs(input_wavs: list[str], output_wav: str) -> None:
@@ -222,16 +277,29 @@ def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None):
 
 async def _generar_audios_edge(textos, carpeta, voz, velocidad):
     archivos_audio = []
-    print(f"[TTS-EDGE] Generando {len(textos)} audios con {voz} (rate {velocidad})...")
+    style = (EDGE_TTS_STYLE or "").strip()
+    deg = (EDGE_TTS_STYLE_DEGREE or "").strip()
+    if style:
+        extra = f" style={style}" + (f" degree={deg}" if deg else "")
+    else:
+        extra = ""
+    print(f"[TTS-EDGE] Generando {len(textos)} audios con {voz} (rate {velocidad}){extra}...")
 
     for i, texto in enumerate(textos):
         nombre_archivo = f"audio_{i}.mp3"
         ruta_completa = os.path.join(carpeta, nombre_archivo)
 
+        texto_in = (texto or "").strip()
+        if style and texto_in:
+                                                                                                            
+            ssml = _build_edge_ssml(text=texto_in, voice=voz, style=style, style_degree=deg)
+        else:
+            ssml = texto_in
+
         for intento in range(3):
             try:
                 await asyncio.sleep(random.uniform(2.0, 4.0))
-                communicate = edge_tts.Communicate(texto, voz, rate=velocidad)
+                communicate = edge_tts.Communicate(ssml, voz, rate=velocidad)
                 await communicate.save(ruta_completa)
                 if os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0:
                     archivos_audio.append(ruta_completa)
@@ -239,6 +307,18 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad):
                     break
             except Exception as e:
                 print(f"   ⚠️ Fallo en audio {i} (Intento {intento+1}/3): {e}")
+                                                                           
+                if style and intento == 0:
+                    try:
+                        await asyncio.sleep(1.0)
+                        communicate = edge_tts.Communicate(texto_in, voz, rate=velocidad)
+                        await communicate.save(ruta_completa)
+                        if os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0:
+                            archivos_audio.append(ruta_completa)
+                            print(f"   - Audio {i+1}/{len(textos)} generado (sin estilo por fallback).")
+                            break
+                    except Exception:
+                        pass
                 if "403" in str(e):
                     print("   🛑 Bloqueo detectado. Esperando 20 segundos...")
                     if intento < 2:

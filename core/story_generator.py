@@ -23,6 +23,10 @@ STORY_QUALITY_ENV = "STORY_QUALITY"
                                                               
                                                              
 OLLAMA_OPTIONS_JSON_ENV = "OLLAMA_OPTIONS_JSON"
+                                                                            
+                                              
+OLLAMA_TEXT_NUM_CTX_ENV = "OLLAMA_TEXT_NUM_CTX"
+OLLAMA_NUM_CTX_ENV = "OLLAMA_NUM_CTX"
                                                                                
 MAX_TOKENS_GEN = 12000
 
@@ -180,9 +184,24 @@ def _call_genai(prompt: str, *, temperature: float = 0.85, max_tokens: int = 500
 
 def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.85) -> str:
     url = (_get_env(OLLAMA_URL_ENV, OLLAMA_URL_DEFAULT) or OLLAMA_URL_DEFAULT).strip()
-    model = (_get_env(OLLAMA_MODEL_ENV, "llama3.1") or "llama3.1").strip()
+                                                                                 
+                                                                           
+    model = (_get_env("OLLAMA_TEXT_MODEL") or "gemma2:9b").strip() or "gemma2:9b"
     timeout_s = int((_get_env(OLLAMA_TIMEOUT_ENV, "180") or "180").strip() or "180")
     print(f"[GPT] Usando Ollama modelo: {model} @ {url} (timeout {timeout_s}s)")
+    def _default_num_ctx() -> int:
+        raw = (
+            _get_env(OLLAMA_TEXT_NUM_CTX_ENV)
+            or _get_env(OLLAMA_NUM_CTX_ENV)
+            or os.environ.get(OLLAMA_TEXT_NUM_CTX_ENV)
+            or os.environ.get(OLLAMA_NUM_CTX_ENV)
+            or "2048"
+        )
+        try:
+            return max(256, int(str(raw).strip()))
+        except Exception:
+            return 2048
+
                                                     
     options = {
         "temperature": temperature,
@@ -200,6 +219,9 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
         options.setdefault("top_p", 0.9)
         options.setdefault("repeat_penalty", 1.15)
 
+                                                                          
+    options.setdefault("num_ctx", _default_num_ctx())
+
                                                        
     options.update(_ollama_options_from_env())
 
@@ -209,11 +231,40 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
         "stream": False,
         "options": options,
     }
+    def _http_error_message(resp: requests.Response) -> str:
+        body = (resp.text or "").strip()
+        if len(body) > 1500:
+            body = body[:1500] + "..."
+        hint = ""
+        low = body.lower()
+        if "model" in low and ("not found" in low or "no such" in low or "does not exist" in low):
+            hint = (
+                "\n[GPT] 💡 Hint: el modelo no está disponible en Ollama. "
+                f"Prueba: `ollama pull {model}` o setea `OLLAMA_TEXT_MODEL`/`OLLAMA_MODEL` a uno disponible."
+            )
+        elif "out of memory" in low or "oom" in low or "cuda" in low or "vram" in low or "requires more system memory" in low:
+            hint = (
+                "\n[GPT] 💡 Hint: parece falta de RAM/VRAM. "
+                "Manteniendo Gemma 2, prueba `gemma2:2b` (recomendado) o `gemma2:9b` vía `OLLAMA_TEXT_MODEL`."
+            )
+        msg = f"Ollama HTTP {resp.status_code} al generar con modelo '{model}'."
+        if body:
+            msg += f"\nOllama dice: {body}"
+        if hint:
+            msg += hint
+        return msg
+
     last_err = None
     for intento in range(2):
         try:
-            resp = requests.post(url, json=payload, timeout=timeout_s)
-            resp.raise_for_status()
+            try:
+                resp = requests.post(url, json=payload, timeout=timeout_s)
+            except requests.exceptions.ConnectionError as e:
+                raise RuntimeError(
+                    f"No se pudo conectar a Ollama en {url}. ¿Está corriendo `ollama serve`/la app de Ollama?"
+                ) from e
+            if resp.status_code >= 400:
+                raise RuntimeError(_http_error_message(resp))
             data = resp.json()
             if "response" not in data:
                 raise RuntimeError("Respuesta de Ollama sin 'response'")
@@ -221,9 +272,16 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
         except Exception as e:
             last_err = e
             if intento == 0:
-                                                                           
+                                                                                                 
                 payload["options"]["num_predict"] = max(256, max_tokens // 2)
-                print(f"[GPT] ⚠️ Ollama timeout/fallo, reintento con menos tokens ({payload['options']['num_predict']})")
+                try:
+                    payload["options"]["num_ctx"] = max(256, int(payload["options"].get("num_ctx") or 2048) // 2)
+                except Exception:
+                    payload["options"]["num_ctx"] = 1024
+                print(
+                    "[GPT] ⚠️ Ollama timeout/fallo, reintento con menos contexto/tokens "
+                    f"(num_ctx={payload['options']['num_ctx']}, num_predict={payload['options']['num_predict']})"
+                )
                 continue
             break
     raise last_err

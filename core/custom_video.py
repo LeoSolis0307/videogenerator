@@ -45,10 +45,21 @@ from utils.fs import crear_carpeta_proyecto
 
                                                                                        
 _VISION_AVAILABLE: bool | None = None
-                                 
+                              
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip()
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "llama3.1:latest").strip() or "llama3.1:latest"
+                           
+                                                                             
+                                                                     
+OLLAMA_TEXT_MODEL = (os.environ.get("OLLAMA_TEXT_MODEL") or "gemma2:9b").strip() or "gemma2:9b"
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
+                                                              
+                                                                          
+OLLAMA_OPTIONS_JSON = (os.environ.get("OLLAMA_OPTIONS_JSON") or "").strip()
+                                                                                     
+                                                                
+OLLAMA_TEXT_NUM_CTX_DEFAULT = int(
+    (os.environ.get("OLLAMA_TEXT_NUM_CTX") or os.environ.get("OLLAMA_NUM_CTX") or "2048").strip() or "2048"
+)
                                                                   
                                                                       
 VISION_TIMEOUT_SEC = int(os.environ.get("VISION_TIMEOUT_SEC", os.environ.get("MOONDREAM_TIMEOUT_SEC", "90")) or "90")
@@ -67,9 +78,49 @@ CUSTOM_IMG_MAX_PER_QUERY = int(os.environ.get("CUSTOM_IMG_MAX_PER_QUERY", "8") o
                                                    
 CUSTOM_IMG_QUALITY = (os.environ.get("CUSTOM_IMG_QUALITY") or "").strip().lower()
 
+                                                                                
+                                                                  
+CUSTOM_HOOK_SEGMENTS = int(os.environ.get("CUSTOM_HOOK_SEGMENTS", "2") or "2")
+CUSTOM_HOOK_EXTRA_CANDIDATES = int(os.environ.get("CUSTOM_HOOK_EXTRA_CANDIDATES", "10") or "10")
+CUSTOM_HOOK_MIN_IMG_SCORE = int(os.environ.get("CUSTOM_HOOK_MIN_IMG_SCORE", "3") or "3")
+
                                                      
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+                                                                             
+                                                                            
+DDG_IMAGES_BACKEND = (os.environ.get("DDG_IMAGES_BACKEND") or "lite").strip().lower() or "lite"
+
+                                                                      
+                                                                                                                    
+_DEFAULT_BLOCKED_HOSTS = {
+    "freepik.com",
+    "img.freepik.com",
+    "pinterest.com",
+    "i.pinimg.com",
+}
+IMG_BLOCKED_HOSTS = {
+    h.strip().lower()
+    for h in re.split(r"[\s,;]+", (os.environ.get("IMG_BLOCKED_HOSTS") or "").strip())
+    if h.strip()
+} or set(_DEFAULT_BLOCKED_HOSTS)
+
+                                                                                       
+ALLOW_AVIF = (os.environ.get("ALLOW_AVIF") or "").strip().lower() in {"1", "true", "yes", "si", "sí"}
+
+
+def _is_blocked_image_host(url: str) -> bool:
+    try:
+        host = (urlparse(url).netloc or "").lower()
+        if not host:
+            return False
+        for bad in IMG_BLOCKED_HOSTS:
+            if host == bad or host.endswith("." + bad):
+                return True
+        return False
+    except Exception:
+        return False
 
 
 
@@ -123,8 +174,8 @@ def generar_guion_personalizado_a_plan(
                                                                   
     try:
         if (os.environ.get("UNLOAD_TEXT_MODEL") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}:
-            if ollama_vram.try_unload_model(OLLAMA_MODEL):
-                print(f"[CUSTOM] ℹ️ Modelo de texto descargado: {OLLAMA_MODEL}")
+            if ollama_vram.try_unload_model(OLLAMA_TEXT_MODEL):
+                print(f"[CUSTOM] ℹ️ Modelo de texto descargado: {OLLAMA_TEXT_MODEL}")
     except Exception:
         pass
 
@@ -137,8 +188,22 @@ def intentar_descargar_modelo_texto() -> bool:
 \
 \
     try:
-        return bool(ollama_vram.try_unload_model(OLLAMA_MODEL))
+        return bool(ollama_vram.try_unload_model(OLLAMA_TEXT_MODEL))
     except Exception:
+        return False
+
+
+def check_text_llm_ready() -> bool:
+    \
+\
+\
+\
+\
+    try:
+        _ = _ollama_generate("Reply only with: OK", temperature=0.0, max_tokens=8)
+        return True
+    except Exception as e:
+        print(f"[CUSTOM] ❌ Ollama no está listo para generar guiones: {e}")
         return False
 
 
@@ -365,36 +430,122 @@ def _extract_json_array(raw: str) -> List[Any]:
     raise ValueError("La respuesta del LLM no fue un array JSON")
 
 
+def _raise_ollama_http_error(resp: requests.Response, *, model: str) -> None:
+    body = (resp.text or "").strip()
+                                      
+    if len(body) > 1500:
+        body = body[:1500] + "..."
+
+    hint = ""
+    low = body.lower()
+    if "model" in low and ("not found" in low or "no such" in low or "does not exist" in low):
+        hint = (
+            "\n[CUSTOM] 💡 Hint: el modelo no está disponible en Ollama. "
+            f"Prueba: `ollama pull {model}` o setea `OLLAMA_TEXT_MODEL` a un modelo que tengas en `ollama list`."
+        )
+    elif "out of memory" in low or "oom" in low or "cuda" in low or "vram" in low or "requires more system memory" in low:
+        hint = (
+            "\n[CUSTOM] 💡 Hint: parece falta de RAM/VRAM. "
+            "Manteniendo Gemma 2, prueba `gemma2:2b` (recomendado) o `gemma2:9b` vía `OLLAMA_TEXT_MODEL`."
+        )
+    elif resp.status_code == 404:
+        hint = "\n[CUSTOM] 💡 Hint: revisa `OLLAMA_URL` (debe apuntar a `http://localhost:11434/api/generate`)."
+
+    msg = f"Ollama HTTP {resp.status_code} al generar con modelo '{model}'."
+    if body:
+        msg += f"\nOllama dice: {body}"
+    if hint:
+        msg += hint
+    raise RuntimeError(msg)
+
+
+def _ollama_extra_options() -> dict:
+    if not OLLAMA_OPTIONS_JSON:
+        return {}
+    try:
+        obj = json.loads(OLLAMA_OPTIONS_JSON)
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        print("[CUSTOM] ⚠️ OLLAMA_OPTIONS_JSON no es JSON válido; ignorando")
+        return {}
+
+
 def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int = 900) -> str:
+    extra = _ollama_extra_options()
+    options = {
+        "temperature": temperature,
+        "num_predict": max_tokens,
+    }
+                                                                                      
+    if "num_ctx" not in extra:
+        options["num_ctx"] = max(256, int(OLLAMA_TEXT_NUM_CTX_DEFAULT))
+    options.update(extra)
+
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": OLLAMA_TEXT_MODEL,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,
-        },
+        "options": options,
     }
-    resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
-    resp.raise_for_status()
-    data = resp.json()
-    text = (data.get("response") or "").strip()
-    return text
+
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            try:
+                resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+            except requests.exceptions.ConnectionError as e:
+                raise RuntimeError(
+                    f"No se pudo conectar a Ollama en {OLLAMA_URL}. "
+                    "¿Está corriendo `ollama serve`/la app de Ollama?"
+                ) from e
+
+            if resp.status_code >= 400:
+                _raise_ollama_http_error(resp, model=OLLAMA_TEXT_MODEL)
+            data = resp.json()
+            text = (data.get("response") or "").strip()
+            return text
+        except Exception as e:
+            last_err = e
+            if attempt == 0:
+                                                                          
+                                                                                         
+                payload["options"]["num_ctx"] = max(256, int(payload["options"].get("num_ctx") or 2048) // 2)
+                payload["options"]["num_predict"] = max(128, int(payload["options"].get("num_predict") or max_tokens) // 2)
+                print(
+                    f"[CUSTOM] ⚠️ Reintentando Ollama con menos contexto/tokens "
+                    f"(num_ctx={payload['options']['num_ctx']}, num_predict={payload['options']['num_predict']})"
+                )
+                continue
+            break
+    raise last_err
 
 
 def _ollama_generate_with_timeout(prompt: str, *, temperature: float, max_tokens: int, timeout_sec: int) -> str:
     \
+    extra = _ollama_extra_options()
+    options = {
+        "temperature": temperature,
+        "num_predict": max_tokens,
+    }
+    if "num_ctx" not in extra:
+        options["num_ctx"] = max(256, int(OLLAMA_TEXT_NUM_CTX_DEFAULT))
+    options.update(extra)
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": OLLAMA_TEXT_MODEL,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,
-        },
+        "options": options,
     }
-    resp = requests.post(OLLAMA_URL, json=payload, timeout=timeout_sec)
-    resp.raise_for_status()
+    try:
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=timeout_sec)
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(
+            f"No se pudo conectar a Ollama en {OLLAMA_URL}. "
+            "¿Está corriendo `ollama serve`/la app de Ollama?"
+        ) from e
+
+    if resp.status_code >= 400:
+        _raise_ollama_http_error(resp, model=OLLAMA_TEXT_MODEL)
     data = resp.json()
     text = (data.get("response") or "").strip()
     if not text:
@@ -575,10 +726,27 @@ def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
 
 
 def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
-    \
-    headers = {"User-Agent": USER_AGENT}
+\
+                                                                   
+                                                                                               
+    referer = ""
     try:
-        resp = requests.get(url, headers={**headers, "Accept": "image/*,*/*;q=0.8"}, timeout=30)
+        p = urlparse(url)
+        if p.scheme and p.netloc:
+            referer = f"{p.scheme}://{p.netloc}/"
+    except Exception:
+        referer = ""
+
+    headers = {
+        "User-Agent": USER_AGENT,
+                                                                                    
+        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.8,es-ES,es;q=0.7",
+    }
+    if referer:
+        headers["Referer"] = referer
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
     except Exception as e:
         print(f"[IMG-WEB] Falló descarga: {e}")
@@ -588,6 +756,19 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
     if ct and ("text/html" in ct or "application/pdf" in ct or "image/svg" in ct):
         print(f"[IMG-WEB] Contenido no-imagen ({ct}), descartado: {url}")
         return None
+
+    if ("image/avif" in ct) and not ALLOW_AVIF:
+        print(f"[IMG-WEB] AVIF no soportado (Content-Type: {ct}), descartado: {url}")
+        return None
+
+                                                                                   
+    try:
+        head = (resp.content or b"")[:512].lstrip().lower()
+        if head.startswith(b"<") and (b"<html" in head or b"doctype" in head or b"captcha" in head):
+            print(f"[IMG-WEB] Respuesta parece HTML/captcha, descartado: {url}")
+            return None
+    except Exception:
+        pass
 
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
     tmp_path = dst_path + ".tmp"
@@ -660,7 +841,9 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
                 "safesearch": "off",
             }
             if _DDG_BACKEND == "ddgs":
-                kwargs["backend"] = "lite"
+                                                                             
+                                                 
+                kwargs["backend"] = DDG_IMAGES_BACKEND
             res = list(ddgs.images(query, **kwargs))
     except Exception as e:
         print(f"[IMG-DDG] Falló búsqueda ({_DDG_BACKEND}): {e}")
@@ -674,8 +857,14 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
         title = r.get("title") or ""
         if not url:
             continue
-        ext = url.split("?")[0].lower()
-        if not any(ext.endswith(suf) for suf in (".jpg", ".jpeg", ".png", ".webp")):
+        if _is_blocked_image_host(url):
+            continue
+                                                                                      
+                                                              
+        ext_path = url.split("?")[0].lower()
+        if any(ext_path.endswith(suf) for suf in (".pdf", ".svg", ".djvu")):
+            continue
+        if not (url.lower().startswith("http://") or url.lower().startswith("https://")):
             continue
         urls.append((url, title))
     return urls
@@ -735,14 +924,86 @@ def descargar_mejores_imagenes_ddg(
     if segment_numbers is not None and len(segment_numbers) != len(queries):
         raise ValueError("segment_numbers debe tener la misma longitud que queries")
 
+    def _uniq_candidates(cands: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+        seen_u = set()
+        out_u: List[Tuple[str, str]] = []
+        for u, t in cands:
+            if not u:
+                continue
+            if u in seen_u:
+                continue
+            seen_u.add(u)
+            out_u.append((u, t))
+        return out_u
+
+    used_urls: set[str] = set()
+
     for idx, q in enumerate(queries):
         note = notes[idx] if idx < len(notes) else ""
-        candidatos = _buscar_ddg_imagenes(q, max_results=max_per_query)
+
+        seg_n = (segment_numbers[idx] if segment_numbers is not None else (idx + 1))
+        is_hook = int(seg_n) <= int(CUSTOM_HOOK_SEGMENTS)
+
+                                                                                                                  
+        local_max = int(max_per_query)
+        if is_hook:
+            local_max = max(local_max, int(max_per_query) + max(0, int(CUSTOM_HOOK_EXTRA_CANDIDATES)))
+
+        candidatos = _buscar_ddg_imagenes(q, max_results=local_max)
+        if is_hook:
+            variants = [
+                q,
+                f"{q} close up photo",
+                f"{q} dramatic lighting photo",
+            ]
+            merged: List[Tuple[str, str]] = []
+            for v in variants:
+                merged.extend(_buscar_ddg_imagenes(v, max_results=max(8, local_max // 2)))
+            candidatos = _uniq_candidates(merged)[: max(local_max, len(candidatos))]
+
+                                                                     
+        if candidatos:
+            candidatos = [(u, t) for (u, t) in candidatos if u not in used_urls]
+
         if not candidatos:
+                                                                                  
+            wiki_url = _wikimedia_image_url(_simplify_query(q))
+            if wiki_url:
+                seg_tag = f"seg_{int(seg_n):02d}"
+                dst = os.path.join(cand_dir, f"{seg_tag}_wiki_01.jpg")
+                saved = _descargar_imagen_a_archivo(wiki_url, dst)
+                if saved:
+                                                                   
+                    ext = os.path.splitext(saved)[1].lower() or ".jpg"
+                    stable = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
+                    try:
+                        if os.path.abspath(saved) != os.path.abspath(stable):
+                            with open(saved, "rb") as src, open(stable, "wb") as dstf:
+                                dstf.write(src.read())
+                        saved = stable
+                    except Exception:
+                        pass
+
+                    used_urls.add(wiki_url)
+                    rutas.append(saved)
+                    meta_all.append({
+                        "query": q,
+                        "note": note,
+                        "candidates": [],
+                        "selected": {
+                            "candidate_index": 1,
+                            "score": int(max(1, MIN_IMG_SCORE)),
+                            "url": wiki_url,
+                            "title": "Wikimedia Commons",
+                            "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
+                        },
+                        "fallback": "wikimedia",
+                    })
+                    continue
+
             meta_all.append({"query": q, "note": note, "candidates": [], "selected": None})
             continue
 
-        seg_n = (segment_numbers[idx] if segment_numbers is not None else (idx + 1))
         seg_tag = f"seg_{int(seg_n):02d}"
         cand_meta: List[Dict[str, Any]] = []
         best_score = -1
@@ -765,7 +1026,14 @@ def descargar_mejores_imagenes_ddg(
                 continue
 
             try:
-                score = _puntuar_con_moondream(saved, q, note=note)
+                score_note = (note or "").strip()
+                if is_hook:
+                    score_note = (
+                        "HOOK (primeros segundos): elige la imagen MÁS llamativa para retener audiencia. "
+                        "Prefiere close-up, alto contraste, emoción/acción, objeto icónico real; evita texto/diagramas/AI. "
+                        + (score_note if score_note else "")
+                    ).strip()
+                score = _puntuar_con_moondream(saved, q, note=score_note)
             except Exception as e:
                 print(f"[IMG-DDG] ❌ No se pudo puntuar candidato {k} de '{q}': {e}")
                 score = 1
@@ -787,6 +1055,71 @@ def descargar_mejores_imagenes_ddg(
 
             if best_score >= 5:
                 break
+
+                                                                                                  
+        if best_path is None:
+            wiki_url = _wikimedia_image_url(_simplify_query(q))
+            if wiki_url:
+                dst = os.path.join(cand_dir, f"{seg_tag}_wiki_01.jpg")
+                saved = _descargar_imagen_a_archivo(wiki_url, dst)
+                if saved:
+                    best_path = saved
+                    best_url = wiki_url
+                    best_title = "Wikimedia Commons"
+                    best_score = max(1, int(MIN_IMG_SCORE))
+                    best_k = 1
+
+                                                                                                         
+        if is_hook and best_score < int(CUSTOM_HOOK_MIN_IMG_SCORE):
+            extra_max = max(local_max, int(max_per_query) + int(CUSTOM_HOOK_EXTRA_CANDIDATES) + 12)
+            variants2 = [
+                q,
+                f"{q} close up",
+                f"{q} high contrast photo",
+                f"{q} cinematic still photo",
+            ]
+            seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
+            merged2: List[Tuple[str, str]] = []
+            for v in variants2:
+                merged2.extend(_buscar_ddg_imagenes(v, max_results=max(10, extra_max // 2)))
+            nuevos2 = [(u, t) for (u, t) in _uniq_candidates(merged2) if u not in seen]
+            for k2, (url, title) in enumerate(nuevos2, start=len(cand_meta) + 1):
+                parsed = url.split("?")[0].lower()
+                ext = ".jpg"
+                for suf in (".jpg", ".jpeg", ".png", ".webp"):
+                    if parsed.endswith(suf):
+                        ext = ".jpg" if suf == ".jpeg" else suf
+                        break
+                dst = os.path.join(cand_dir, f"{seg_tag}_{k2:02d}{ext}")
+                saved = _descargar_imagen_a_archivo(url, dst)
+                if not saved:
+                    continue
+                try:
+                    score_note = (note or "").strip()
+                    score_note = (
+                        "HOOK (primeros segundos): elige la imagen MÁS llamativa para retener audiencia. "
+                        "Prefiere close-up, alto contraste, emoción/acción, objeto icónico real; evita texto/diagramas/AI. "
+                        + (score_note if score_note else "")
+                    ).strip()
+                    score = _puntuar_con_moondream(saved, q, note=score_note)
+                except Exception as e:
+                    print(f"[IMG-DDG] ❌ No se pudo puntuar candidato {k2} de '{q}': {e}")
+                    score = 1
+                cand_meta.append({
+                    "candidate_index": k2,
+                    "url": url,
+                    "title": title,
+                    "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
+                    "score": int(score),
+                })
+                if score > best_score:
+                    best_score = score
+                    best_path = saved
+                    best_url = url
+                    best_title = title
+                    best_k = k2
+                if best_score >= 5:
+                    break
 
                                                                                                         
         if (best_score < int(MIN_IMG_SCORE)) and (CUSTOM_IMG_QUALITY in {"high", "alta", "best", "max", "maxima", "máxima"}):
@@ -841,6 +1174,8 @@ def descargar_mejores_imagenes_ddg(
                 pass
 
             rutas.append(best_path)
+            if best_url:
+                used_urls.add(best_url)
             selected = {
                 "candidate_index": best_k,
                 "score": int(best_score),
@@ -1689,7 +2024,13 @@ def generar_video_personalizado(
     return True
 
 
-def renderizar_video_personalizado_desde_plan(carpeta_plan: str, *, voz: str, velocidad: str) -> bool:
+def renderizar_video_personalizado_desde_plan(
+    carpeta_plan: str,
+    *,
+    voz: str,
+    velocidad: str,
+    interactive: bool = True,
+) -> bool:
     \
 \
 \
@@ -1905,51 +2246,52 @@ def renderizar_video_personalizado_desde_plan(carpeta_plan: str, *, voz: str, ve
         except Exception as e:
             print(f"[CUSTOM] ⚠️ No se pudo hacer selección manual de candidatos: {e}")
 
-                                                                                              
-    n = len(segmentos)
-    while True:
-        print("\n[CUSTOM] Segmentos y selección actual:")
-        for i, seg in enumerate(segmentos, start=1):
-            sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
-            p = (sel or {}).get("path") if isinstance(sel, dict) else None
-            sc = (sel or {}).get("score") if isinstance(sel, dict) else None
-            note = str((seg or {}).get("note") or "").strip()
-            print(f"  {i}. score={sc} img={p or 'N/A'} | {note[:80]}")
+                                                                                   
+    if bool(interactive):
+        n = len(segmentos)
+        while True:
+            print("\n[CUSTOM] Segmentos y selección actual:")
+            for i, seg in enumerate(segmentos, start=1):
+                sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
+                p = (sel or {}).get("path") if isinstance(sel, dict) else None
+                sc = (sel or {}).get("score") if isinstance(sel, dict) else None
+                note = str((seg or {}).get("note") or "").strip()
+                print(f"  {i}. score={sc} img={p or 'N/A'} | {note[:80]}")
 
-        raw = input("\nReemplazar imagen (1-{}), o ENTER para renderizar: ".format(n)).strip()
-        if not raw:
-            break
-        try:
-            idx = int(raw)
-        except Exception:
-            continue
-        if idx < 1 or idx > n:
-            continue
-        src = input("Ruta local o URL de la nueva imagen: ").strip()
-        try:
-            new_path = _copiar_imagen_manual_a_segmento(carpeta_plan, idx, src)
-            q = str((segmentos[idx - 1] or {}).get("image_query") or "").strip() or str((segmentos[idx - 1] or {}).get("image_prompt") or "").strip()
-            note = str((segmentos[idx - 1] or {}).get("note") or "").strip()
-            score = _puntuar_con_moondream(new_path, q, note=note)
-            rel = os.path.relpath(new_path, carpeta_plan).replace("\\", "/")
-            segmentos[idx - 1]["image_selection"] = {
-                "query": q,
-                "note": note,
-                "candidates": [],
-                "selected": {
-                    "candidate_index": None,
-                    "score": int(score),
-                    "url": None,
-                    "title": "manual",
-                    "path": rel,
-                },
-            }
-            plan["segments"] = segmentos
-            with open(plan_file, "w", encoding="utf-8") as f:
-                json.dump(plan, f, ensure_ascii=False, indent=2)
-            print(f"[CUSTOM] ✅ Imagen reemplazada para segmento {idx} (score={score})")
-        except Exception as e:
-            print(f"[CUSTOM] ❌ No se pudo reemplazar: {e}")
+            raw = input("\nReemplazar imagen (1-{}), o ENTER para renderizar: ".format(n)).strip()
+            if not raw:
+                break
+            try:
+                idx = int(raw)
+            except Exception:
+                continue
+            if idx < 1 or idx > n:
+                continue
+            src = input("Ruta local o URL de la nueva imagen: ").strip()
+            try:
+                new_path = _copiar_imagen_manual_a_segmento(carpeta_plan, idx, src)
+                q = str((segmentos[idx - 1] or {}).get("image_query") or "").strip() or str((segmentos[idx - 1] or {}).get("image_prompt") or "").strip()
+                note = str((segmentos[idx - 1] or {}).get("note") or "").strip()
+                score = _puntuar_con_moondream(new_path, q, note=note)
+                rel = os.path.relpath(new_path, carpeta_plan).replace("\\", "/")
+                segmentos[idx - 1]["image_selection"] = {
+                    "query": q,
+                    "note": note,
+                    "candidates": [],
+                    "selected": {
+                        "candidate_index": None,
+                        "score": int(score),
+                        "url": None,
+                        "title": "manual",
+                        "path": rel,
+                    },
+                }
+                plan["segments"] = segmentos
+                with open(plan_file, "w", encoding="utf-8") as f:
+                    json.dump(plan, f, ensure_ascii=False, indent=2)
+                print(f"[CUSTOM] ✅ Imagen reemplazada para segmento {idx} (score={score})")
+            except Exception as e:
+                print(f"[CUSTOM] ❌ No se pudo reemplazar: {e}")
     timeline = []
     pos = 0.0
     for q, d in zip([str(s.get("image_query") or s.get("image_prompt") or "") for s in segmentos], duraciones):
