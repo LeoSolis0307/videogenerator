@@ -23,10 +23,10 @@ VOZ_ID_LOCAL_POR_DEFECTO = (
 )
 
                                                                                                  
-VELOCIDAD_WPM_POR_DEFECTO = 200
+VELOCIDAD_WPM_POR_DEFECTO = 210
 
                                           
-VELOCIDAD_EDGE = "-20%"
+VELOCIDAD_EDGE = "-10%"
 
                                                     
                                                                                                                 
@@ -110,6 +110,77 @@ def _split_text(texto: str, max_chars: int = 500) -> list[str]:
             for i in range(0, len(c), max_chars):
                 final.append(c[i : i + max_chars])
     return final
+
+
+_URL_RE = re.compile(r"(?i)(?:https?://|www\.)\S+")
+
+                                                       
+                                                                        
+_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,6})(?:/[^\s]*)?\b")
+
+                                                 
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://)[^\)]+\)")
+
+                                                                        
+                                                                                 
+_EMOJI_RE = re.compile(
+    r"[\U0001F000-\U0001FAFF\U0001F1E6-\U0001F1FF\u2600-\u26FF\u2700-\u27BF\uFE0F]"
+)
+
+
+_SSML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_ssml(text: str) -> str:
+    \
+\
+\
+\
+\
+\
+\
+\
+    s = (text or "")
+    if not s:
+        return ""
+                                                
+    if "<" not in s and ">" not in s:
+        return s
+                                            
+    s2 = _SSML_TAG_RE.sub(" ", s)
+                                                                       
+    s2 = (
+        s2.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
+    )
+    s2 = re.sub(r"\s+", " ", s2).strip()
+    return s2
+
+
+def _strip_urls(text: str) -> str:
+    \
+\
+\
+\
+    s = (text or "")
+    if not s:
+        return ""
+                                                                 
+    s = s.replace("\\/", "/")
+
+                                                                                   
+    s = _MD_LINK_RE.sub(r"\1", s)
+    s2 = _URL_RE.sub(" ", s)
+    s2 = _DOMAIN_RE.sub(" ", s2)
+
+                                                     
+    s2 = s2.replace("\u200d", " ")       
+    s2 = _EMOJI_RE.sub(" ", s2)
+    s2 = re.sub(r"\s+", " ", s2).strip()
+    return s2
 
 
 def _xml_escape(s: str) -> str:
@@ -203,11 +274,11 @@ def _render_wav_subprocess(*, texto: str, ruta_wav: str, voz_id: str | None, rat
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
             if err:
-                print(f"[TTS-LOCAL] ⚠️ tts_worker falló: {err[:300]}")
+                print(f"[TTS-LOCAL] WARNING: tts_worker falló: {err[:300]}")
             return False
         return os.path.exists(ruta_wav) and os.path.getsize(ruta_wav) > 0
     except subprocess.TimeoutExpired:
-        print(f"[TTS-LOCAL] ⚠️ Timeout generando WAV ({timeout_s}s).")
+        print(f"[TTS-LOCAL] WARNING: Timeout generando WAV ({timeout_s}s).")
         return False
     finally:
         try:
@@ -277,50 +348,37 @@ def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None):
 
 async def _generar_audios_edge(textos, carpeta, voz, velocidad):
     archivos_audio = []
-    style = (EDGE_TTS_STYLE or "").strip()
-    deg = (EDGE_TTS_STYLE_DEGREE or "").strip()
-    if style:
-        extra = f" style={style}" + (f" degree={deg}" if deg else "")
-    else:
-        extra = ""
-    print(f"[TTS-EDGE] Generando {len(textos)} audios con {voz} (rate {velocidad}){extra}...")
+                 
+                                                                                                       
+                                                                                                          
+                                                 
+    style = (os.environ.get("EDGE_TTS_STYLE") or "").strip()
+    auto = (os.environ.get("EDGE_TTS_AUTO_STYLE") or "").strip().lower()
+    if style or auto in {"1", "true", "yes", "si", "sí"}:
+        print("[TTS-EDGE] WARNING: Estilos SSML desactivados (edge-tts escapa el input y se narran los tags).")
+    print(f"[TTS-EDGE] Generando {len(textos)} audios con {voz} (rate {velocidad})...")
 
     for i, texto in enumerate(textos):
         nombre_archivo = f"audio_{i}.mp3"
         ruta_completa = os.path.join(carpeta, nombre_archivo)
 
-        texto_in = (texto or "").strip()
-        if style and texto_in:
-                                                                                                            
-            ssml = _build_edge_ssml(text=texto_in, voice=voz, style=style, style_degree=deg)
-        else:
-            ssml = texto_in
+        texto_in = (textos[i] or "").strip().replace("\u200b", " ")
+        texto_in = _strip_ssml(texto_in)
+        texto_in = _strip_urls(texto_in)
 
         for intento in range(3):
             try:
                 await asyncio.sleep(random.uniform(2.0, 4.0))
-                communicate = edge_tts.Communicate(ssml, voz, rate=velocidad)
+                communicate = edge_tts.Communicate(texto_in, voz, rate=velocidad)
                 await communicate.save(ruta_completa)
                 if os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0:
                     archivos_audio.append(ruta_completa)
                     print(f"   - Audio {i+1}/{len(textos)} generado.")
                     break
             except Exception as e:
-                print(f"   ⚠️ Fallo en audio {i} (Intento {intento+1}/3): {e}")
-                                                                           
-                if style and intento == 0:
-                    try:
-                        await asyncio.sleep(1.0)
-                        communicate = edge_tts.Communicate(texto_in, voz, rate=velocidad)
-                        await communicate.save(ruta_completa)
-                        if os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0:
-                            archivos_audio.append(ruta_completa)
-                            print(f"   - Audio {i+1}/{len(textos)} generado (sin estilo por fallback).")
-                            break
-                    except Exception:
-                        pass
+                print(f"   WARNING: Fallo en audio {i} (Intento {intento+1}/3): {e}")
                 if "403" in str(e):
-                    print("   🛑 Bloqueo detectado. Esperando 20 segundos...")
+                    print("   WARNING: Bloqueo detectado. Esperando 20 segundos...")
                     if intento < 2:
                         await asyncio.sleep(20)
                 else:
@@ -339,7 +397,7 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
                         
     if _parece_voz_edge(voz):
         if edge_tts is None:
-            print("❌ edge-tts no está disponible en este entorno.")
+            print("[TTS-EDGE] ERROR: edge-tts no está disponible en este entorno.")
             return []
         voz_edge = voz
         vel_edge = velocidad if isinstance(velocidad, str) and "%" in velocidad else VELOCIDAD_EDGE
@@ -362,6 +420,8 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
         total = len(textos)
         for idx, texto in enumerate(textos):
             texto = (textos[idx] or "").strip().replace("\u200b", " ")
+            texto = _strip_ssml(texto)
+            texto = _strip_urls(texto)
             ruta = os.path.join(carpeta, f"audio_{idx}.wav")
             print(f"   - Renderizando audio {idx+1}/{total} (chars={len(texto)})")
 
@@ -380,7 +440,7 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
 
             chunks = _split_text(texto, max_chars=450)
             if len(chunks) == 1:
-                print("[TTS-LOCAL] ❌ Falló este audio incluso sin split.")
+                print("[TTS-LOCAL] ERROR: Falló este audio incluso sin split.")
                 continue
 
             print(f"[TTS-LOCAL] Reintentando con split en {len(chunks)} partes...")
@@ -396,7 +456,7 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
                     timeout_s=90,
                 )
                 if not ok_part:
-                    print(f"[TTS-LOCAL] ❌ Falló parte {j+1}/{len(chunks)}")
+                    print(f"[TTS-LOCAL] ERROR: Falló parte {j+1}/{len(chunks)}")
                     temp_paths = []
                     break
 
@@ -410,8 +470,8 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
                 if os.path.exists(ruta) and os.path.getsize(ruta) > 0:
                     rutas_generadas.append(ruta)
 
-        print(f"[TTS-LOCAL] ✅ Terminados {len(rutas_generadas)} audios correctamente.")
+        print(f"[TTS-LOCAL] OK: Terminados {len(rutas_generadas)} audios correctamente.")
         return rutas_generadas
     except Exception as e:
-        print(f"❌ Error en motor local: {e}")
+        print(f"[TTS-LOCAL] ERROR: Error en motor local: {e}")
         return []

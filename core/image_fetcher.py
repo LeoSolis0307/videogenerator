@@ -222,7 +222,7 @@ def _comfy_descargar_imagen(entry: dict, carpeta: str, idx: int) -> str:
     ruta = os.path.join(carpeta, f"img_{idx}.png")
     with open(ruta, "wb") as f:
         f.write(resp.content)
-    _recortar_abajo(ruta)
+                                                                      
     return ruta
 
 

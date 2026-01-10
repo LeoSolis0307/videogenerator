@@ -15,6 +15,18 @@ MAX_VIDEO_SEC = 30 * 60
 DEFAULT_VIDEOS_DIR = r"C:\Users\Leonardo\Downloads\video\media"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
+                                              
+                                                                               
+                                                     
+FIT_MODE = (os.environ.get("VIDEO_FIT_MODE") or "pad").strip().lower()
+PAD_STYLE = (os.environ.get("VIDEO_PAD_STYLE") or "blur").strip().lower()              
+ENABLE_KENBURNS = (os.environ.get("VIDEO_KENBURNS") or "0").strip() in {"1", "true", "yes"}
+KB_RATE = float(os.environ.get("VIDEO_KB_RATE") or 0.0009)
+KB_MAX = float(os.environ.get("VIDEO_KB_MAX") or 1.08)
+XF_MS = int(os.environ.get("VIDEO_CROSSFADE_MS") or 250)                     
+ENABLE_LOUDNORM = (os.environ.get("ENABLE_LOUDNORM") or "1").strip() in {"1", "true", "yes"}
+VIDEO_BLUR = (os.environ.get("VIDEO_BLUR") or "10:1").strip()                        
+
 
 def _encoding_cfg() -> dict:
     \
@@ -77,9 +89,76 @@ def _encoding_cfg() -> dict:
 def _scale_filter(size: int) -> str:
     cfg = _encoding_cfg()
     flags = cfg.get("scale_flags") or ""
+                                                                                  
+    mode = "decrease" if FIT_MODE != "crop" else "increase"
     if flags:
-        return f"scale={size}:{size}:force_original_aspect_ratio=decrease:flags={flags}"
-    return f"scale={size}:{size}:force_original_aspect_ratio=decrease"
+        return f"scale={size}:{size}:force_original_aspect_ratio={mode}:flags={flags}"
+    return f"scale={size}:{size}:force_original_aspect_ratio={mode}"
+
+
+def _post_scale_fit(size: int) -> str:
+                                                                     
+    if FIT_MODE == "crop":
+        return f"crop={size}:{size}:(iw-{size})/2:(ih-{size})/2"
+                               
+    return f"pad={size}:{size}:(%d-iw)/2:(%d-ih)/2" % (size, size)
+
+
+def _build_per_stream_filters(idx: int, fps: str, dur_val: float, size: int = 768) -> list[str]:
+    vlabel = f"v{idx}"
+    parts: list[str] = []
+
+    fps_val = str(fps)
+                                                                               
+    try:
+        stop_frame = 1.0 / float(fps)
+    except Exception:
+        stop_frame = 0.04
+    pad_sec = max(0.0, float(dur_val) - float(stop_frame))
+    pad_sec_s = f"{pad_sec:.6f}"
+    dur_s = f"{float(dur_val):.6f}"
+    if FIT_MODE == "pad" and PAD_STYLE == "blur":
+                                                                           
+        parts.append(f"[{idx}:v]split=2[s{idx}a][s{idx}b]")
+                                       
+        parts.append(
+            f"[s{idx}a]fps={fps_val},scale={size}:{size}:force_original_aspect_ratio=increase,"
+            f"crop={size}:{size},format=yuv420p,boxblur={VIDEO_BLUR},setsar=1[bg{idx}]"
+        )
+                                           
+        if ENABLE_KENBURNS:
+            frames = max(1, int(round(float(fps) * float(dur_val))))
+            parts.append(
+                f"[s{idx}b]fps={fps_val},zoompan=z='min(zoom+{KB_RATE},{KB_MAX})':d={frames}:s={size}x{size},format=yuv420p,setsar=1[fg{idx}]"
+            )
+        else:
+            parts.append(
+                f"[s{idx}b]fps={fps_val},scale={size}:{size}:force_original_aspect_ratio=decrease,format=yuv420p,setsar=1[fg{idx}]"
+            )
+        parts.append(
+            f"[bg{idx}][fg{idx}]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2,"
+            f"tpad=stop_mode=clone:stop_duration={pad_sec_s},trim=duration={dur_s},"
+            f"format=yuv420p,settb=AVTB,setpts=PTS-STARTPTS,fps={fps_val}[{vlabel}]"
+        )
+        return parts
+
+                                                            
+    if ENABLE_KENBURNS:
+        frames = max(1, int(round(float(fps) * float(dur_val))))
+        parts.append(
+            f"[{idx}:v]fps={fps_val},zoompan=z='min(zoom+{KB_RATE},{KB_MAX})':d={frames}:s={size}x{size},"
+            f"format=yuv420p,setsar=1,tpad=stop_mode=clone:stop_duration={pad_sec_s},trim=duration={dur_s},"
+            f"settb=AVTB,setpts=PTS-STARTPTS,fps={fps_val}[{vlabel}]"
+        )
+        return parts
+
+                                                    
+    parts.append(
+        f"[{idx}:v]fps={fps_val},{_scale_filter(size)},{_post_scale_fit(size)},setsar=1,format=yuv420p,"
+        f"tpad=stop_mode=clone:stop_duration={pad_sec_s},trim=duration={dur_s},"
+        f"settb=AVTB,setpts=PTS-STARTPTS,fps={fps_val}[{vlabel}]"
+    )
+    return parts
 
 
 def _pick_ffmpeg() -> str:
@@ -107,6 +186,213 @@ def _pick_ffmpeg() -> str:
 def _ffmpeg_path(path: str) -> str:
                                                                      
     return os.path.abspath(path).replace("\\", "/")
+
+
+def _png_signature_ok(path: str) -> bool:
+    try:
+        if not path or not os.path.exists(path):
+            return False
+        with open(path, "rb") as f:
+            sig = f.read(8)
+        return sig == b"\x89PNG\r\n\x1a\n"
+    except Exception:
+        return False
+
+def _looks_like_avif_container(path: str) -> bool:
+    \
+\
+\
+\
+\
+    try:
+        if not path or not os.path.exists(path):
+            return False
+        with open(path, "rb") as f:
+            head = f.read(64)
+                                                 
+        return (b"ftypavif" in head) or (b"ftypmif1" in head and b"avif" in head)
+    except Exception:
+        return False
+
+
+def _looks_like_ffmpeg_decode_error(stderr_text: str) -> bool:
+    if not stderr_text:
+        return False
+    s = stderr_text.lower()
+                                                                                                           
+    needles = [
+        "invalid png signature",
+        "error submitting packet",
+        "decoding error",
+        "invalid data found when processing input",
+        "could not find codec parameters",
+        "error while decoding",
+    ]
+    return any(n in s for n in needles)
+
+
+def _make_placeholder_png(ffmpeg: str, out_path: str, size: int = 768) -> str:
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        f"color=c=black:s={size}x{size}",
+        "-frames:v",
+        "1",
+        _ffmpeg_path(out_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=20)
+    if os.path.exists(out_path) and os.path.getsize(out_path) >= 256 and _png_signature_ok(out_path):
+        return out_path
+    raise RuntimeError(f"[VIDEO] No se pudo generar placeholder PNG: {out_path}")
+
+
+def _sanitize_image_for_ffmpeg(
+    ffmpeg: str,
+    img_path: str,
+    out_dir: str,
+    idx: int,
+    report: list[dict] | None = None,
+) -> str:
+    \
+\
+\
+\
+\
+\
+\
+\
+\
+\
+    def _add_report(status: str, used: str, note: str | None = None) -> None:
+        if report is None:
+            return
+        report.append(
+            {
+                "index": idx + 1,
+                "original": os.path.abspath(img_path),
+                "used": os.path.abspath(used),
+                "status": status,
+                "note": (note or "").strip(),
+            }
+        )
+
+    if not os.path.exists(img_path):
+        raise FileNotFoundError(f"[VIDEO] No se encontró la imagen: {img_path}")
+
+    try:
+        if os.path.getsize(img_path) < 1024:
+            raise ValueError("archivo demasiado pequeño")
+    except Exception:
+        raise ValueError(f"[VIDEO] Imagen inválida (tamaño): {img_path}")
+
+    ext = os.path.splitext(img_path)[1].lower()
+
+                                                                                           
+    force_convert = ext in {".jpg", ".jpeg"} and _looks_like_avif_container(img_path)
+    if force_convert:
+        print(f"[VIDEO] WARNING: Detectado AVIF con extensión JPG/JPEG. Convirtiendo a PNG: {img_path}")
+
+    if not force_convert and ext == ".png" and not _png_signature_ok(img_path):
+                                                                 
+        print(f"[VIDEO] WARNING: PNG inválido (signature). Intentando reparar: {img_path}")
+    elif not force_convert:
+                                         
+        try:
+            test_cmd = [
+                ffmpeg,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                _ffmpeg_path(img_path),
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ]
+            res = subprocess.run(test_cmd, check=True, capture_output=True, text=True, timeout=25)
+            if _looks_like_ffmpeg_decode_error((res.stderr or "") + (res.stdout or "")):
+                raise RuntimeError("FFmpeg reportó error de decodificación")
+            _add_report("ok", img_path)
+            return img_path
+        except Exception:
+            print(f"[VIDEO] WARNING: Imagen no decodificable. Intentando convertir a PNG: {img_path}")
+
+                                                  
+    os.makedirs(out_dir, exist_ok=True)
+    repaired = os.path.join(out_dir, f"img_{idx:02d}_repaired.png")
+    conv_cmd = [
+        ffmpeg,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        _ffmpeg_path(img_path),
+        "-frames:v",
+        "1",
+        _ffmpeg_path(repaired),
+    ]
+    try:
+        res = subprocess.run(conv_cmd, check=True, capture_output=True, text=True, timeout=60)
+        if _looks_like_ffmpeg_decode_error((res.stderr or "") + (res.stdout or "")):
+            raise RuntimeError("FFmpeg reportó error al convertir")
+        if os.path.exists(repaired) and os.path.getsize(repaired) >= 1024 and _png_signature_ok(repaired):
+                                                                                       
+            try:
+                test_repaired = [
+                    ffmpeg,
+                    "-nostdin",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    _ffmpeg_path(repaired),
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ]
+                res2 = subprocess.run(test_repaired, check=True, capture_output=True, text=True, timeout=25)
+                if not _looks_like_ffmpeg_decode_error((res2.stderr or "") + (res2.stdout or "")):
+                    _add_report("repaired", repaired)
+                    return repaired
+            except Exception:
+                pass
+    except subprocess.CalledProcessError as e:
+        err = (e.stderr or "")[:800]
+        print(
+            f"[VIDEO] ERROR: Imagen inválida en input #{idx + 1}. "
+            f"FFmpeg no pudo decodificar/convertir: {img_path}\n{err}"
+        )
+    except Exception as e:
+        print(
+            f"[VIDEO] ERROR: Imagen inválida en input #{idx + 1}. "
+            f"FFmpeg no pudo decodificar/convertir: {img_path} ({e})"
+        )
+
+                                                                
+    placeholder = os.path.join(out_dir, f"img_{idx:02d}_PLACEHOLDER.png")
+    try:
+        ph = _make_placeholder_png(ffmpeg, placeholder, size=768)
+        print(f"[VIDEO] WARNING: Usando placeholder para input #{idx + 1}: {img_path}")
+        _add_report("placeholder", ph, note="No se pudo decodificar/convertir; se usó placeholder")
+        return ph
+    except Exception:
+                                                                                    
+        raise RuntimeError(f"[VIDEO] Imagen inválida en input #{idx + 1}: {img_path}")
 
 
 def _audio_duration_seconds(path: str) -> float:
@@ -190,7 +476,7 @@ def _audio_duration_seconds(path: str) -> float:
 
                      
     if out:
-        print(f"[VIDEO] ⚠️ No se pudo leer duración. Fragmento de salida:\n{out[:4000]}")
+        print(f"[VIDEO] WARNING: No se pudo leer duración. Fragmento de salida:\n{out[:4000]}")
 
     return 0.0
 
@@ -386,7 +672,7 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
         print(f"[VIDEO] Extendiendo último frame {pad_sec:.2f}s para empatar audio")
 
     subprocess.run(cmd, check=True)
-    print(f"[VIDEO] ✅ Video final renderizado: {salida}")
+    print(f"[VIDEO] OK: Video final renderizado: {salida}")
 
                                                                                         
     try:
@@ -402,7 +688,7 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
             os.rename(video_abs, new_path)
             print(f"[VIDEO] Renombrado para no reutilizar: {new_path}")
     except Exception as e:
-        print(f"[VIDEO] ⚠️ No se pudo renombrar el video usado: {e}")
+        print(f"[VIDEO] WARNING: No se pudo renombrar el video usado: {e}")
 
     return salida
 
@@ -515,9 +801,43 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
     if not os.path.exists(audio_abs):
         raise FileNotFoundError(f"[VIDEO] No se encontró el audio: {audio_abs}")
 
-    for img in imagenes:
-        if not os.path.exists(img):
-            raise FileNotFoundError(f"[VIDEO] No se encontró la imagen: {img}")
+                                                                                                              
+    imagenes_ok: list[str] = []
+    report_entries: list[dict] = []
+    repaired_dir = os.path.join(carpeta_abs, "_repaired")
+    for idx, img in enumerate(imagenes):
+        img_abs = os.path.abspath(img)
+        imagenes_ok.append(_sanitize_image_for_ffmpeg(ffmpeg, img_abs, repaired_dir, idx, report=report_entries))
+
+                                                                                     
+    try:
+        os.makedirs(repaired_dir, exist_ok=True)
+        report_json = os.path.join(repaired_dir, "repaired_report.json")
+        report_txt = os.path.join(repaired_dir, "repaired_report.txt")
+
+        with open(report_json, "w", encoding="utf-8") as f:
+            json.dump(report_entries, f, ensure_ascii=False, indent=2)
+
+        ok_count = sum(1 for e in report_entries if e.get("status") == "ok")
+        repaired_count = sum(1 for e in report_entries if e.get("status") == "repaired")
+        ph_count = sum(1 for e in report_entries if e.get("status") == "placeholder")
+        with open(report_txt, "w", encoding="utf-8") as f:
+            f.write("Sanitización de imágenes (antes de FFmpeg)\n")
+            f.write(f"Total: {len(report_entries)} | ok={ok_count} | repaired={repaired_count} | placeholder={ph_count}\n\n")
+            for e in report_entries:
+                f.write(f"#{e.get('index')}: {e.get('status')}\n")
+                f.write(f"  original: {e.get('original')}\n")
+                f.write(f"  used:     {e.get('used')}\n")
+                note = (e.get("note") or "").strip()
+                if note:
+                    f.write(f"  note:     {note}\n")
+                f.write("\n")
+        print(
+            f"[VIDEO] Reporte de imágenes guardado en: {report_txt} "
+            f"(ok={ok_count}, repaired={repaired_count}, placeholder={ph_count})"
+        )
+    except Exception as e:
+        print(f"[VIDEO] WARNING: No se pudo guardar reporte de sanitización: {e}")
 
     dur_list = list(durations or [])
     if dur_list and len(dur_list) < len(imagenes):
@@ -527,33 +847,70 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
         dur_audio = max(1.0, _audio_duration_seconds(audio_abs))
         tiempo_img = max(1, math.ceil(dur_audio / len(imagenes)))
 
-                                                                                          
+                                                                                           
                                                                                                          
-    inputs: list[str] = [ffmpeg, "-y"]
+                                                                                         
+                                                                                   
+                                                                                           
+                                
+    inputs: list[str] = [ffmpeg, "-y", "-nostdin", "-hide_banner", "-xerror"]
     filter_parts: list[str] = []
     vlabels: list[str] = []
 
     cfg = _encoding_cfg()
     fps = cfg["fps"]
 
-    for idx, img in enumerate(imagenes):
+    per_dur: list[float] = []
+    for idx, img in enumerate(imagenes_ok):
         dur_val = max(0.5, float(dur_list[idx])) if dur_list else max(0.5, float(tiempo_img))
-        inputs.extend(["-loop", "1", "-t", str(dur_val), "-i", _ffmpeg_path(img)])
+        per_dur.append(dur_val)
+                                                                                             
+        inputs.extend(["-i", _ffmpeg_path(img)])
 
         vlabel = f"v{idx}"
         vlabels.append(f"[{vlabel}]")
-        filter_parts.append(
-            f"[{idx}:v]fps={fps},{_scale_filter(768)},"
-            f"pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,format=yuv420p,setpts=PTS-STARTPTS[{vlabel}]"
-        )
+                                                                                       
+        parts = _build_per_stream_filters(idx, fps, dur_val, 768)
+        filter_parts.extend(parts)
 
                              
     audio_input_index = len(imagenes)
     inputs.extend(["-i", _ffmpeg_path(audio_abs)])
 
     n = len(imagenes)
-    concat_in = "".join(vlabels)
-    filter_complex = ";".join(filter_parts) + f";{concat_in}concat=n={n}:v=1:a=0[v]"
+    filter_complex = ";".join(filter_parts)
+    last_video_label = "[v]"
+    if n == 1 or XF_MS <= 0:
+                                               
+        concat_in = "".join(vlabels)
+        filter_complex += f";{concat_in}concat=n={n}:v=1:a=0[v]"
+    else:
+                              
+                                                                                               
+        raw_fade = max(0.02, float(XF_MS) / 1000.0)
+        fps_num = float(fps)
+        fade_frames = max(1, int(round(fps_num * raw_fade)))
+        fade_dur = float(fade_frames) / fps_num
+        cum = per_dur[0]
+        offset = max(0.0, cum - fade_dur)
+                                                                                               
+        filter_complex += (
+            f";{vlabels[0]}{vlabels[1]}xfade=transition=fade:duration={fade_dur}:offset={offset}[x1]"
+            f";[x1]format=yuv420p,settb=AVTB,setsar=1,setpts=PTS-STARTPTS,fps={fps}[x1n]"
+        )
+        last = "[x1n]"
+        for i in range(2, n):
+            cum += per_dur[i - 1]
+            offset = max(0.0, cum - (i * fade_dur))
+                                                                                         
+            next_label = f"[x{i}]"
+            next_norm = f"[x{i}n]"
+            filter_complex += (
+                f";{last}{vlabels[i]}xfade=transition=fade:duration={fade_dur}:offset={offset}{next_label}"
+                f";{next_label}format=yuv420p,settb=AVTB,setsar=1,setpts=PTS-STARTPTS,fps={fps}{next_norm}"
+            )
+            last = next_norm
+        last_video_label = last
 
     salida = os.path.join(carpeta_abs, "Video_Final.mp4")
 
@@ -563,7 +920,7 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
             "-filter_complex",
             filter_complex,
             "-map",
-            "[v]",
+            last_video_label,
             "-map",
             f"{audio_input_index}:a:0",
             "-c:v",
@@ -595,18 +952,16 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
         cmd.insert(cmd.index("-movflags"), "-b:a")
         cmd.insert(cmd.index("-movflags"), cfg["audio_bitrate"])
 
-    print("[VIDEO] Ejecutando FFmpeg...")
-    res = subprocess.run(cmd, capture_output=True, text=True)
-    if res.returncode != 0:
-        out = (res.stdout or "")[:4000]
-        err = (res.stderr or "")[:4000]
-        if out:
-            print(f"[VIDEO] ffmpeg stdout:\n{out}")
-        if err:
-            print(f"[VIDEO] ffmpeg stderr:\n{err}")
-        res.check_returncode()
+    if ENABLE_LOUDNORM:
+                                                           
+        insert_at = cmd.index("-movflags") if "-movflags" in cmd else len(cmd)
+        cmd.insert(insert_at, "loudnorm=I=-14:TP=-1.5:LRA=11")
+        cmd.insert(insert_at, "-af")
 
-    print(f"[VIDEO] ✅ Video renderizado: {salida}")
+    print("[VIDEO] Ejecutando FFmpeg...")
+    subprocess.run(cmd, check=True)
+
+    print(f"[VIDEO] OK: Video renderizado: {salida}")
     return salida
 
 
@@ -619,10 +974,26 @@ def _slugify_title(title: str | None) -> str:
         return "video"
 
     words = cleaned.split()
-    shortened = " ".join(words[:12])[:90].strip()
+
+                                                             
+                                                       
+    max_words = 20
+    max_chars = 140
+
+    parts: list[str] = []
+    for w in words[:max_words]:
+        candidate = (" ".join(parts + [w])).strip()
+        if len(candidate) > max_chars:
+            break
+        parts.append(w)
+
+    shortened = " ".join(parts).strip() or "video"
     shortened = re.sub(r"\s+", " ", shortened)
-    safe = re.sub(r"[^\w\s-]", "", shortened)
-    safe = safe.replace(" ", "_").strip("_- ")
+
+                                                                  
+                                                                     
+    safe = re.sub(r"[^\w\s#-]", "", shortened)
+    safe = re.sub(r"\s+", " ", safe).strip("- _")
     return safe or "video"
 
 
@@ -662,18 +1033,20 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
     cfg = _encoding_cfg()
     fps = cfg["fps"]
 
+                                                                                            
+                                                                                     
+    mute_intro = (os.environ.get("INTRO_MUTE_AUDIO") or "").strip().lower() in {"1", "true", "yes", "si", "sí"}
+    a1 = "[1:a]volume=0," if mute_intro else "[1:a]"
     filter_complex = (
-        f"[0:v]fps={fps},{_scale_filter(768)},"
-        "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
-        f"[1:v]fps={fps},{_scale_filter(768)},"
-        "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1,setpts=PTS-STARTPTS[v1];"
+        f"[0:v]{_scale_filter(768)},pad=768:768:(768-iw)/2:(768-ih)/2,format=yuv420p,setsar=1,settb=AVTB,setpts=PTS-STARTPTS,fps={fps}[v0];"
+        f"[1:v]{_scale_filter(768)},pad=768:768:(768-iw)/2:(768-ih)/2,format=yuv420p,setsar=1,settb=AVTB,setpts=PTS-STARTPTS,fps={fps}[v1];"
         "[0:a]aresample=48000,asetpts=PTS-STARTPTS[a0];"
-        "[1:a]aresample=48000,asetpts=PTS-STARTPTS[a1];"
+        f"{a1}aresample=48000,asetpts=PTS-STARTPTS[a1];"
         "[v0][a0][v1][a1]concat=n=2:v=1:a=1[v][a]"
     )
 
     cmd = [
-        ffmpeg, "-y",
+        ffmpeg, "-y", "-nostdin",
         "-i", video_abs,
         "-i", intro_abs,
         "-filter_complex", filter_complex,
@@ -700,7 +1073,7 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
     print("[VIDEO] Ejecutando FFmpeg para agregar intro...")
     subprocess.run(cmd, check=True)
 
-    print(f"[VIDEO] ✅ Intro agregada: {salida_fs}")
+    print(f"[VIDEO] OK: Intro agregada: {salida_fs}")
     return salida_fs
 
 
@@ -719,15 +1092,14 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
     cfg = _encoding_cfg()
     fps = cfg["fps"]
 
-                                                                                                   
+                                                                                        
     filter_complex = (
-        f"[0:v]fps={fps},{_scale_filter(768)},"
-        "pad=768:768:(768-iw)/2:(768-ih)/2,setsar=1[v0]"
+        f"[0:v]{_scale_filter(768)},pad=768:768:(768-iw)/2:(768-ih)/2,format=yuv420p,setsar=1,"
+        f"tpad=stop_mode=clone:stop_duration=36000,trim=duration=36000,settb=AVTB,setpts=PTS-STARTPTS,fps={fps}[v0]"
     )
 
     cmd = [
-        ffmpeg, "-y",
-        "-loop", "1",
+        ffmpeg, "-y", "-nostdin",
         "-i", _ffmpeg_path(image_path),
         "-i", _ffmpeg_path(audio_path),
         "-filter_complex", filter_complex,
@@ -755,5 +1127,5 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
 
     print(f"[CLIP] Renderizando corto: {salida_fs}")
     subprocess.run(cmd, check=True)
-    print(f"[CLIP] ✅ Generado: {salida_fs}")
+    print(f"[CLIP] OK: Generado: {salida_fs}")
     return salida_fs

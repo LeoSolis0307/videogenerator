@@ -1,8 +1,10 @@
 import json
 import math
 import os
+import random
 import re
 import sys
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote_plus
@@ -48,9 +50,19 @@ _VISION_AVAILABLE: bool | None = None
                               
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip()
                            
-                                                                             
-                                                                     
-OLLAMA_TEXT_MODEL = (os.environ.get("OLLAMA_TEXT_MODEL") or "gemma2:9b").strip() or "gemma2:9b"
+                                                                                                
+                                                              
+                                                                                  
+OLLAMA_TEXT_MODEL_SHORT = (os.environ.get("OLLAMA_TEXT_MODEL_SHORT") or "gemma2:9b").strip() or "gemma2:9b"
+OLLAMA_TEXT_MODEL_LONG = (os.environ.get("OLLAMA_TEXT_MODEL_LONG") or "qwen2.5:7b").strip() or "qwen2.5:7b"
+
+
+def _text_model_for_seconds(target_seconds: int | None) -> str:
+    try:
+        sec = int(target_seconds or 0)
+    except Exception:
+        sec = 0
+    return OLLAMA_TEXT_MODEL_LONG if sec >= 300 else OLLAMA_TEXT_MODEL_SHORT
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
                                                               
                                                                           
@@ -86,11 +98,121 @@ CUSTOM_HOOK_MIN_IMG_SCORE = int(os.environ.get("CUSTOM_HOOK_MIN_IMG_SCORE", "3")
 
                                                      
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                                                                                       
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/121.0.0.0 Safari/537.36"
+)
 
                                                                              
                                                                             
 DDG_IMAGES_BACKEND = (os.environ.get("DDG_IMAGES_BACKEND") or "lite").strip().lower() or "lite"
+
+                                                                                                 
+                                                                                               
+ENABLE_TEXT_RANK = (os.environ.get("CUSTOM_IMG_TEXT_RANK") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}
+
+_STOPWORDS_ES = {
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "y", "o", "u", "de", "del", "al", "a",
+    "en", "por", "para", "con", "sin", "sobre", "entre", "tras", "desde", "hasta", "que", "como",
+    "cuando", "donde", "quien", "quienes", "cual", "cuales", "este", "esta", "estos", "estas",
+    "ese", "esa", "esos", "esas", "mi", "mis", "tu", "tus", "su", "sus", "me", "te", "se",
+    "lo", "le", "les", "ya", "muy", "mas", "más", "menos", "tambien", "también", "pero", "porque",
+    "si", "sí", "no", "ni", "solo", "sólo", "todo", "toda", "todos", "todas", "cada",
+    "esta", "está", "estan", "están", "era", "eran", "fue", "fueron", "ser", "estar", "haber",
+    "hay", "habia", "había", "habian", "habían", "tiene", "tienen", "tenia", "tenía", "tener",
+    "hace", "hacen", "hacer", "dijo", "dijeron", "dice", "dicen",
+    "ahi", "ahí", "aqui", "aquí", "alli", "allí",
+}
+
+_STOPWORDS_EN = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "without", "from", "by",
+    "this", "that", "these", "those", "is", "are", "was", "were", "be", "been", "being",
+    "as", "at", "it", "its", "into", "over", "under", "about", "between", "after", "before",
+    "photo", "image", "picture", "stock", "illustration",
+}
+
+
+def _tokenize_words(text: str) -> list[str]:
+    if not text:
+        return []
+                                                                    
+    words = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9]{2,}", str(text))
+    return [w.lower() for w in words]
+
+
+def _extract_keywords(text: str, *, max_keywords: int = 7) -> list[str]:
+    words = _tokenize_words(text)
+    if not words:
+        return []
+
+    freq: dict[str, int] = {}
+    for w in words:
+        if len(w) < 3:
+            continue
+        if w in _STOPWORDS_ES or w in _STOPWORDS_EN:
+            continue
+        if w.isdigit():
+            continue
+        freq[w] = freq.get(w, 0) + 1
+
+    if not freq:
+        return []
+
+    scored = sorted(
+        freq.items(),
+        key=lambda kv: (kv[1] * math.log(1 + len(kv[0])), kv[1], len(kv[0])),
+        reverse=True,
+    )
+    out: list[str] = []
+    for w, _ in scored:
+        if w in out:
+            continue
+        out.append(w)
+        if len(out) >= int(max_keywords):
+            break
+    return out
+
+
+def _build_better_image_query(*, base_query: str, text_es: str = "", note: str = "", brief: str = "") -> str:
+    base = (base_query or "").strip()
+    context = " ".join([brief or "", note or "", text_es or ""]).strip()
+    kws = _extract_keywords(context, max_keywords=6)
+
+    base_low = base.lower()
+    generic = any(g in base_low for g in ["photo", "person", "people", "scene", "dramatic", "story", "background"])
+
+    parts: list[str] = []
+    if generic and kws:
+        parts.extend(kws[:4])
+        if base:
+            parts.append(base)
+    else:
+        if base:
+            parts.append(base)
+        if kws:
+            parts.extend(kws[:4])
+
+    q = " ".join([p for p in parts if p]).strip()
+    q_words = q.split()
+    if len(q_words) > 12:
+        q = " ".join(q_words[:12])
+    return q or (base or "photo")
+
+
+def _candidate_text_relevance(url: str, title: str, *, keywords: list[str]) -> float:
+    if not keywords:
+        return 0.0
+    hay_low = ((title or "") + " " + (url or "")).lower()
+    hits = 0
+    for kw in keywords:
+        if not kw or len(kw) < 3:
+            continue
+        if kw.lower() in hay_low:
+            hits += 1
+                                                    
+    return float(hits) + (0.05 if (title or "").strip() else 0.0)
 
                                                                       
                                                                                                                     
@@ -99,6 +221,9 @@ _DEFAULT_BLOCKED_HOSTS = {
     "img.freepik.com",
     "pinterest.com",
     "i.pinimg.com",
+                                                                        
+    "researchgate.net",
+    "rgstatic.net",
 }
 IMG_BLOCKED_HOSTS = {
     h.strip().lower()
@@ -121,6 +246,94 @@ def _is_blocked_image_host(url: str) -> bool:
         return False
     except Exception:
         return False
+
+
+_WIKIMEDIA_UA = (os.environ.get("WIKIMEDIA_USER_AGENT") or os.environ.get("IMG_WIKIMEDIA_UA") or "").strip()
+_WARNED_WIKIMEDIA_UA = False
+
+
+def _is_wikimedia_host(host: str) -> bool:
+    host = (host or "").lower().strip()
+    return host.endswith("wikimedia.org") or host.endswith("wikipedia.org")
+
+
+def _maybe_warn_wikimedia_ua() -> None:
+    \
+    global _WARNED_WIKIMEDIA_UA
+    if _WARNED_WIKIMEDIA_UA:
+        return
+    if not _WIKIMEDIA_UA:
+        _WARNED_WIKIMEDIA_UA = True
+        print(
+            "[IMG-WEB] ℹ️ Consejo: para evitar 429 de Wikimedia, define WIKIMEDIA_USER_AGENT "
+            "con un UA identificable (incluye contacto)."
+        )
+
+
+def _resolve_wikimedia_thumb_via_api(url: str) -> str | None:
+    \
+\
+\
+\
+\
+    try:
+        p = urlparse(url)
+        host = (p.netloc or "").lower()
+        if not host.endswith("upload.wikimedia.org"):
+            return None
+
+        parts = [x for x in (p.path or "").split("/") if x]
+                                                                            
+        if "thumb" not in parts:
+            return None
+        i = parts.index("thumb")
+        if len(parts) <= i + 3:
+            return None
+        filename = parts[i + 3]
+        if not filename:
+            return None
+
+                                                                          
+                                  
+        width = 1600
+        if parts and parts[-1]:
+            m = re.match(r"^(\d{2,5})px-", parts[-1])
+            if m:
+                try:
+                    width = int(m.group(1))
+                except Exception:
+                    width = 1600
+        width = max(256, min(int(width), 2400))
+
+        params = {
+            "action": "query",
+            "format": "json",
+            "prop": "imageinfo",
+            "titles": f"File:{filename}",
+            "iiprop": "url|mime",
+            "iiurlwidth": width,
+        }
+
+        _maybe_warn_wikimedia_ua()
+        headers = {"User-Agent": (_WIKIMEDIA_UA or USER_AGENT)}
+        resp = requests.get(WIKI_API, params=params, headers=headers, timeout=20)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        pages = (data.get("query") or {}).get("pages") or {}
+        for page in pages.values():
+            info = page.get("imageinfo") if isinstance(page, dict) else None
+            if not info:
+                continue
+            entry = info[0]
+            thumb = entry.get("thumburl")
+            if thumb:
+                return str(thumb)
+            direct = entry.get("url")
+            if direct:
+                return str(direct)
+        return None
+    except Exception:
+        return None
 
 
 
@@ -155,8 +368,15 @@ def generar_guion_personalizado_a_plan(
                 base_title,
                 brief=str(plan.get("brief") or brief or "").strip(),
                 script_es=script_es,
-                max_total_len=100,
             )
+    except Exception:
+        pass
+
+                                                                                          
+    try:
+        yt_title_txt = os.path.join(carpeta, "youtube_title.txt")
+        with open(yt_title_txt, "w", encoding="utf-8") as f:
+            f.write(str(plan.get("youtube_title_es") or "").strip() + "\n")
     except Exception:
         pass
     plan["seleccionar_imagenes"] = bool(seleccionar_imagenes)
@@ -174,8 +394,14 @@ def generar_guion_personalizado_a_plan(
                                                                   
     try:
         if (os.environ.get("UNLOAD_TEXT_MODEL") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}:
-            if ollama_vram.try_unload_model(OLLAMA_TEXT_MODEL):
-                print(f"[CUSTOM] ℹ️ Modelo de texto descargado: {OLLAMA_TEXT_MODEL}")
+                                                                                 
+            ok_any = False
+            for m in {OLLAMA_TEXT_MODEL_SHORT, OLLAMA_TEXT_MODEL_LONG}:
+                if m and ollama_vram.try_unload_model(m):
+                    ok_any = True
+                    print(f"[CUSTOM] ℹ️ Modelo de texto descargado: {m}")
+            if not ok_any:
+                pass
     except Exception:
         pass
 
@@ -188,7 +414,11 @@ def intentar_descargar_modelo_texto() -> bool:
 \
 \
     try:
-        return bool(ollama_vram.try_unload_model(OLLAMA_TEXT_MODEL))
+        ok_any = False
+        for m in {OLLAMA_TEXT_MODEL_SHORT, OLLAMA_TEXT_MODEL_LONG}:
+            if m and ollama_vram.try_unload_model(m):
+                ok_any = True
+        return ok_any
     except Exception:
         return False
 
@@ -200,7 +430,7 @@ def check_text_llm_ready() -> bool:
 \
 \
     try:
-        _ = _ollama_generate("Reply only with: OK", temperature=0.0, max_tokens=8)
+        _ = _ollama_generate("Reply only with: OK", temperature=0.0, max_tokens=8, model=OLLAMA_TEXT_MODEL_SHORT)
         return True
     except Exception as e:
         print(f"[CUSTOM] ❌ Ollama no está listo para generar guiones: {e}")
@@ -245,12 +475,58 @@ def _segments_word_stats(segmentos: List[Dict[str, Any]]) -> tuple[int, int, int
     return min(ws), int(sum(ws) / len(ws)), max(ws)
 
 
+def _plan_quality_issues(segmentos: List[Dict[str, Any]], *, target_seconds: int) -> List[str]:
+    issues: List[str] = []
+    if not segmentos:
+        return ["sin_segmentos"]
+
+    texts = [str(s.get("text_es") or "").strip() for s in segmentos]
+
+                         
+    lowered = [t.lower() for t in texts]
+    intro_hits = sum(
+        1
+        for t in lowered
+        if any(x in t for x in ["bienvenid", "hoy", "en este video", "en este vídeo", "hoy vamos"])
+    )
+    if intro_hits > 1:
+        issues.append("intro_repetida")
+
+                                                                            
+    def _has_final_marker(t: str) -> bool:
+        tl = t.lower()
+        return ("dato curioso final" in tl) or ("¿sabías que" in tl) or ("sabias que" in tl) or ("sabías que" in tl)
+
+    final_markers = [i for i, t in enumerate(lowered) if _has_final_marker(t)]
+    if not final_markers:
+        issues.append("sin_dato_curioso_final")
+    else:
+        if len(final_markers) != 1:
+            issues.append("multiples_datos_curiosos_finales")
+        if final_markers and final_markers[-1] != len(segmentos) - 1:
+            issues.append("dato_curioso_no_es_ultimo")
+
+                               
+    if len(set(texts)) != len(texts):
+        issues.append("segmentos_duplicados")
+
+                                                                    
+    if int(target_seconds) >= 300:
+        w_min, w_avg, w_max = _segments_word_stats(segmentos)
+        if w_min < 30:
+            issues.append("segmentos_demasiado_cortos")
+        if w_max > 120:
+            issues.append("segmentos_demasiado_largos")
+    return issues
+
+
 def _prompt_add_segments(brief: str, contexto: str, *, need_words: int, n_segments: int, last_note: str = "") -> str:
     contexto_line = contexto if contexto else "Sin contexto web disponible."
     last_line = (last_note or "").strip()
     parts = [
         "You are continuing a Spanish YouTube video script plan. ",
         "Add NEW segments that continue the narrative and add real information (no filler). ",
+        "Style: energetic and human (not monotone), with light sarcasm and occasional short jokes; avoid offensive humor, profanity, and emojis. ",
         "These are MID segments: do NOT write an ending/closure, no generic outro, no 'suscríbete', no despedidas. ",
         "Focus on concrete curious facts, examples, and details about the chosen topic. ",
         "Return ONLY a JSON array (no object) with segment objects.\n",
@@ -312,6 +588,7 @@ def _prompt_rewrite_closing_segment(brief: str, contexto: str, last_segment: Dic
         wmin, wmax = 25, 65
     return (
         "Eres guionista de YouTube en español. Reescribe SOLO el ÚLTIMO segmento para que sea un cierre con un DATO CURIOSO FINAL. "
+        "Tono: energético y humano (no plano), con sarcasmo ligero y, si encaja, un chiste corto (sin groserías ni humor ofensivo). "
         "No cierres con frases vagas tipo 'exploramos el mundo mágico'. Debe quedar una idea concreta memorable.\n"
         f"BRIEF: {brief}\n"
         f"DATOS RAPIDOS: {contexto_line}\n"
@@ -403,6 +680,8 @@ def _extract_json_value(raw: str) -> Any:
     if o_s != -1 and o_e != -1 and o_e > o_s:
         chunk = raw[o_s : o_e + 1]
         try:
+                                                                                      
+            chunk = re.sub(r",\s*([\]}])", r"\1", chunk)
             return json.loads(chunk)
         except Exception:
             pass
@@ -411,7 +690,11 @@ def _extract_json_value(raw: str) -> Any:
     a_e = raw.rfind("]")
     if a_s != -1 and a_e != -1 and a_e > a_s:
         chunk = raw[a_s : a_e + 1]
-        return json.loads(chunk)
+        try:
+            chunk = re.sub(r",\s*([\]}])", r"\1", chunk)
+            return json.loads(chunk)
+        except Exception:
+            pass
 
     raise ValueError("No se encontró JSON parseable en la respuesta del LLM")
 
@@ -420,6 +703,9 @@ def _extract_json_object(raw: str) -> Dict[str, Any]:
     obj = _extract_json_value(raw)
     if isinstance(obj, dict):
         return obj
+                                        
+    preview = (raw or "")[:500]
+    print(f"[CUSTOM] ❌ La respuesta del LLM no fue un objeto JSON. Preview: {preview}...")
     raise ValueError("La respuesta del LLM no fue un objeto JSON")
 
 
@@ -470,7 +756,8 @@ def _ollama_extra_options() -> dict:
         return {}
 
 
-def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int = 900) -> str:
+def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int = 900, model: str | None = None) -> str:
+    model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
     extra = _ollama_extra_options()
     options = {
         "temperature": temperature,
@@ -482,7 +769,7 @@ def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int 
     options.update(extra)
 
     payload = {
-        "model": OLLAMA_TEXT_MODEL,
+        "model": model_name,
         "prompt": prompt,
         "stream": False,
         "options": options,
@@ -500,7 +787,7 @@ def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int 
                 ) from e
 
             if resp.status_code >= 400:
-                _raise_ollama_http_error(resp, model=OLLAMA_TEXT_MODEL)
+                _raise_ollama_http_error(resp, model=model_name)
             data = resp.json()
             text = (data.get("response") or "").strip()
             return text
@@ -520,18 +807,29 @@ def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int 
     raise last_err
 
 
-def _ollama_generate_with_timeout(prompt: str, *, temperature: float, max_tokens: int, timeout_sec: int) -> str:
+def _ollama_generate_with_timeout(
+    prompt: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    timeout_sec: int,
+    min_ctx: int = None,
+    model: str | None = None,
+) -> str:
     \
+    model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
     extra = _ollama_extra_options()
     options = {
         "temperature": temperature,
         "num_predict": max_tokens,
     }
     if "num_ctx" not in extra:
-        options["num_ctx"] = max(256, int(OLLAMA_TEXT_NUM_CTX_DEFAULT))
+                                                                            
+        default_ctx = min_ctx if min_ctx else int(OLLAMA_TEXT_NUM_CTX_DEFAULT)
+        options["num_ctx"] = max(256, default_ctx)
     options.update(extra)
     payload = {
-        "model": OLLAMA_TEXT_MODEL,
+        "model": model_name,
         "prompt": prompt,
         "stream": False,
         "options": options,
@@ -545,7 +843,7 @@ def _ollama_generate_with_timeout(prompt: str, *, temperature: float, max_tokens
         ) from e
 
     if resp.status_code >= 400:
-        _raise_ollama_http_error(resp, model=OLLAMA_TEXT_MODEL)
+        _raise_ollama_http_error(resp, model=model_name)
     data = resp.json()
     text = (data.get("response") or "").strip()
     if not text:
@@ -553,12 +851,26 @@ def _ollama_generate_with_timeout(prompt: str, *, temperature: float, max_tokens
     return text
 
 
-def _ollama_generate_json(prompt: str, *, temperature: float = 0.65, max_tokens: int = 900) -> Dict[str, Any]:
-    raw = _ollama_generate(prompt, temperature=temperature, max_tokens=max_tokens)
+def _ollama_generate_json(
+    prompt: str,
+    *,
+    temperature: float = 0.65,
+    max_tokens: int = 900,
+    model: str | None = None,
+) -> Dict[str, Any]:
+    raw = _ollama_generate(prompt, temperature=temperature, max_tokens=max_tokens, model=model)
     return _extract_json_object(raw)
 
 
-def _ollama_generate_json_with_timeout(prompt: str, *, temperature: float, max_tokens: int, timeout_sec: int) -> Dict[str, Any]:
+def _ollama_generate_json_with_timeout(
+    prompt: str,
+    *,
+    temperature: float,
+    max_tokens: int,
+    timeout_sec: int,
+    min_ctx: int = None,
+    model: str | None = None,
+) -> Dict[str, Any]:
     def _prompt_fix_invalid_json(bad_raw: str, err: Exception) -> str:
         bad = (bad_raw or "").strip()
                                 
@@ -572,24 +884,53 @@ def _ollama_generate_json_with_timeout(prompt: str, *, temperature: float, max_t
             f"{bad}\n"
             "INVALID_JSON_END\n"
         )
+    
+    def _is_memory_error(err: Exception) -> bool:
+        \
+        err_str = str(err).lower()
+        return any(keyword in err_str for keyword in [
+            "cublas", "cuda", "out of memory", "vram", 
+            "llama runner process has terminated", "internal_error"
+        ])
 
     last_err: Exception | None = None
     raw_last = ""
+    current_max_tokens = max_tokens
+    current_min_ctx = min_ctx
+    model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
 
-                           
-    for attempt in range(2):
+                                                                
+    for attempt in range(3):
         try:
             raw_last = _ollama_generate_with_timeout(
                 prompt,
                 temperature=temperature,
-                max_tokens=max_tokens,
+                max_tokens=current_max_tokens,
                 timeout_sec=timeout_sec,
+                min_ctx=current_min_ctx,
+                model=model_name,
             )
             return _extract_json_object(raw_last)
         except Exception as e:
             last_err = e
-                                                                                                          
-            temperature = min(0.8, max(0.2, temperature + 0.05))
+            
+                                                                      
+            if _is_memory_error(e):
+                if attempt == 0:
+                                                                   
+                    current_min_ctx = int((current_min_ctx or 4096) * 0.4) if current_min_ctx else 1536
+                    current_max_tokens = int(current_max_tokens * 0.4)
+                    print(f"[CUSTOM] ⚠️ Error de VRAM detectado. Reintentando con ctx={current_min_ctx}, tokens={current_max_tokens}")
+                    continue
+                elif attempt == 1:
+                                                                                      
+                    current_min_ctx = int((min_ctx or 4096) * 0.15) if min_ctx else 768
+                    current_max_tokens = max(500, int(max_tokens * 0.15))
+                    print(f"[CUSTOM] ⚠️ Error de VRAM persiste. Último intento con ctx={current_min_ctx}, tokens={current_max_tokens}")
+                    continue
+            else:
+                                                         
+                temperature = min(0.8, max(0.2, temperature + 0.05))
 
                                                                                
     if raw_last:
@@ -601,6 +942,8 @@ def _ollama_generate_json_with_timeout(prompt: str, *, temperature: float, max_t
                     temperature=0.2,
                     max_tokens=max_tokens,
                     timeout_sec=timeout_sec,
+                    min_ctx=min_ctx,
+                    model=model_name,
                 )
                 return _extract_json_object(raw_last)
             except Exception as e:
@@ -673,12 +1016,49 @@ def _buscar_url_imagen(query: str) -> str | None:
 
 
 def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
+    accept_avif = _can_convert_avif() or ALLOW_AVIF
+    accept_header = "image/*,*/*;q=0.8"
+    if accept_avif:
+        accept_header = "image/avif," + accept_header
     headers = {"User-Agent": USER_AGENT}
+
+                                                                        
     try:
-        resp = requests.get(url, headers={**headers, "Accept": "image/*,*/*;q=0.8"}, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[IMG-WEB] Falló descarga: {e}")
+        resolved = _resolve_wikimedia_thumb_via_api(url)
+        if resolved:
+            url = resolved
+            headers = {"User-Agent": (_WIKIMEDIA_UA or USER_AGENT)}
+    except Exception:
+        pass
+
+    resp = None
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, headers={**headers, "Accept": accept_header}, timeout=30)
+                                                                     
+            if resp.status_code in {401, 403, 404}:
+                resp.raise_for_status()
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                wait = 2.5 * attempt
+                if retry_after:
+                    try:
+                        wait = max(wait, float(retry_after))
+                    except Exception:
+                        pass
+                time.sleep(min(30.0, wait + random.random()))
+                continue
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            last_err = e
+                                                     
+            if attempt < 3:
+                time.sleep(min(8.0, 1.2 * attempt + random.random()))
+            resp = None
+    if resp is None:
+        print(f"[IMG-WEB] Falló descarga: {last_err}")
         return None
 
     ct = (resp.headers.get("Content-Type") or "").lower()
@@ -719,6 +1099,9 @@ def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
                 pass
             print(f"[IMG-WEB] Imagen corrupta, descartada: {url}")
             return None
+                                                                           
+        path = _convert_webp_to_png_if_needed(path)
+        path = _convert_avif_to_png_if_needed(path)
         return path
     except Exception as e:
         print(f"[IMG-WEB] No se pudo guardar imagen: {e}")
@@ -737,19 +1120,54 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
     except Exception:
         referer = ""
 
+                                                                                  
+    accept_avif = _can_convert_avif() or ALLOW_AVIF
+    accept_header = "image/webp,image/apng,image/*,*/*;q=0.8"
+    if accept_avif:
+        accept_header = "image/avif," + accept_header
     headers = {
         "User-Agent": USER_AGENT,
-                                                                                    
-        "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept": accept_header,
         "Accept-Language": "en-US,en;q=0.8,es-ES,es;q=0.7",
     }
     if referer:
         headers["Referer"] = referer
+
+                                                                                     
     try:
-        resp = requests.get(url, headers=headers, timeout=30)
-        resp.raise_for_status()
-    except Exception as e:
-        print(f"[IMG-WEB] Falló descarga: {e}")
+        resolved = _resolve_wikimedia_thumb_via_api(url)
+        if resolved:
+            url = resolved
+            headers["User-Agent"] = (_WIKIMEDIA_UA or headers.get("User-Agent") or USER_AGENT)
+    except Exception:
+        pass
+
+    resp = None
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code in {401, 403, 404}:
+                resp.raise_for_status()
+            if resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                wait = 2.5 * attempt
+                if retry_after:
+                    try:
+                        wait = max(wait, float(retry_after))
+                    except Exception:
+                        pass
+                time.sleep(min(30.0, wait + random.random()))
+                continue
+            resp.raise_for_status()
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 3:
+                time.sleep(min(8.0, 1.2 * attempt + random.random()))
+            resp = None
+    if resp is None:
+        print(f"[IMG-WEB] Falló descarga: {last_err}")
         return None
 
     ct = (resp.headers.get("Content-Type") or "").lower()
@@ -757,7 +1175,7 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
         print(f"[IMG-WEB] Contenido no-imagen ({ct}), descartado: {url}")
         return None
 
-    if ("image/avif" in ct) and not ALLOW_AVIF:
+    if ("image/avif" in ct) and not (ALLOW_AVIF or _can_convert_avif()):
         print(f"[IMG-WEB] AVIF no soportado (Content-Type: {ct}), descartado: {url}")
         return None
 
@@ -797,6 +1215,9 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
                 pass
             print(f"[IMG-WEB] Imagen corrupta, descartada: {url}")
             return None
+                                                                           
+        final_path = _convert_webp_to_png_if_needed(final_path)
+        final_path = _convert_avif_to_png_if_needed(final_path)
         return final_path
     except Exception as e:
         try:
@@ -808,26 +1229,223 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
         return None
 
 
+def _convert_webp_to_png_if_needed(path: str) -> str:
+    try:
+        base, ext = os.path.splitext(path)
+        if ext.lower() != ".webp":
+            return path
+        try:
+            from PIL import Image
+        except Exception:
+                                                          
+            return path
+        new_path = base + ".png"
+        with Image.open(path) as img:
+            try:
+                if getattr(img, "is_animated", False):
+                    img.seek(0)
+            except Exception:
+                pass
+                                               
+            if img.mode not in ("RGBA", "LA"):
+                img = img.convert("RGBA")
+            img.save(new_path, format="PNG", optimize=True)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return new_path
+    except Exception as e:
+                                                                  
+        ff = _convert_to_png_with_ffmpeg(path)
+        if ff:
+            return ff
+        print(f"[IMG-WEB] No se pudo convertir WEBP a PNG: {e}")
+        return path
+
+
+def _ffmpeg_exe_for_images() -> str | None:
+    try:
+        import imageio_ffmpeg
+
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        return str(exe) if exe else None
+    except Exception:
+        return None
+
+
+def _convert_to_png_with_ffmpeg(path: str) -> str | None:
+    \
+    ffmpeg = _ffmpeg_exe_for_images()
+    if not ffmpeg:
+        return None
+
+    base, _ext = os.path.splitext(path)
+    out_path = base + ".png"
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        path,
+        "-frames:v",
+        "1",
+        out_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        if os.path.exists(out_path) and os.path.getsize(out_path) >= 1024:
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            return out_path
+    except subprocess.CalledProcessError as e:
+        if _DEBUG_IMG_VALIDATION:
+            err = (e.stderr or "")[:800]
+            print(f"[IMG-WEB] ffmpeg no pudo convertir a PNG: {err}")
+    except Exception as e:
+        if _DEBUG_IMG_VALIDATION:
+            print(f"[IMG-WEB] ffmpeg no pudo convertir a PNG: {e}")
+    return None
+
+
+def _normalizar_imagen_descargada(path: str, content_type: str = "") -> str:
+    \
+\
+\
+\
+\
+    try:
+        if not path or not os.path.exists(path):
+            return path
+
+        ext = os.path.splitext(path)[1].lower()
+        fmt = (imghdr.what(path) or "").lower()
+        ct = (content_type or "").lower()
+
+                                                       
+        if ext == ".avif" or "image/avif" in ct:
+            return _convert_avif_to_png_if_needed(path)
+
+        is_webp = ext == ".webp" or fmt == "webp" or "image/webp" in ct
+        if not is_webp:
+            return path
+
+                                                   
+        converted = _convert_webp_to_png_if_needed(path)
+        if converted != path:
+            return converted
+
+                                                                      
+        ff = _convert_to_png_with_ffmpeg(path)
+        return ff or path
+    except Exception:
+        return path
+
+
+def _can_convert_avif() -> bool:
+    try:
+                                                         
+        import pillow_avif                
+        from PIL import Image              
+        return True
+    except Exception:
+        return False
+
+
+def _convert_avif_to_png_if_needed(path: str) -> str:
+    try:
+        base, ext = os.path.splitext(path)
+        if ext.lower() != ".avif":
+            return path
+        if not _can_convert_avif():
+            return path
+        from PIL import Image                
+
+        new_path = base + ".png"
+        with Image.open(path) as img:
+            try:
+                if getattr(img, "is_animated", False):
+                    img.seek(0)
+            except Exception:
+                pass
+            if img.mode not in ("RGBA", "LA"):
+                img = img.convert("RGBA")
+            img.save(new_path, format="PNG", optimize=True)
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return new_path
+    except Exception as e:
+        print(f"[IMG-WEB] No se pudo convertir AVIF a PNG: {e}")
+        return path
+
+
 def _es_imagen_valida(path: str) -> bool:
     try:
         if not os.path.exists(path):
             return False
         if os.path.getsize(path) < 1024:                                     
             return False
-        if not imghdr.what(path):
-            return False
+
+                                                                     
         try:
             from PIL import Image                              
 
             with Image.open(path) as img:
-                img.verify()
+                img.load()
+            return True
         except ImportError:
-            pass
+                                                
+            return bool(imghdr.what(path))
         except Exception:
-            return False
-        return True
+                                                                           
+                                                                                                          
+            fmt = (imghdr.what(path) or "").lower()
+            return fmt in {"jpeg", "png", "gif", "bmp", "webp"}
     except Exception:
         return False
+
+
+def _crear_placeholder_imagen(carpeta: str, seg_tag: str) -> str | None:
+    \
+\
+\
+\
+    os.makedirs(carpeta, exist_ok=True)
+
+                                                   
+    try:
+        from PIL import Image                
+
+        path = os.path.join(carpeta, f"{seg_tag}_chosen.png")
+        img = Image.new("RGB", (768, 768), (18, 18, 18))
+        img.save(path, format="PNG", optimize=True)
+        if _es_imagen_valida(path):
+            return path
+    except Exception:
+        pass
+
+                                                                    
+    try:
+        path = os.path.join(carpeta, f"{seg_tag}_chosen.ppm")
+        w, h = 768, 768
+        header = f"P6\n{w} {h}\n255\n".encode("ascii")
+                     
+        pixel = bytes([18, 18, 18])
+        with open(path, "wb") as f:
+            f.write(header)
+            f.write(pixel * (w * h))
+        if _es_imagen_valida(path):
+            return path
+    except Exception:
+        pass
+    return None
 
 
 def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
@@ -961,6 +1579,16 @@ def descargar_mejores_imagenes_ddg(
                 merged.extend(_buscar_ddg_imagenes(v, max_results=max(8, local_max // 2)))
             candidatos = _uniq_candidates(merged)[: max(local_max, len(candidatos))]
 
+                                                                                   
+        if ENABLE_TEXT_RANK and candidatos:
+            kw = _extract_keywords(f"{q} {note}", max_keywords=10)
+            if kw:
+                candidatos = sorted(
+                    candidatos,
+                    key=lambda ut: _candidate_text_relevance(ut[0], ut[1], keywords=kw),
+                    reverse=True,
+                )
+                candidatos = candidatos[: int(local_max)]
                                                                      
         if candidatos:
             candidatos = [(u, t) for (u, t) in candidatos if u not in used_urls]
@@ -1441,7 +2069,7 @@ def _prompt_titulo_youtube(brief: str, script_es: str) -> str:
     return (
         "Eres experto en títulos virales de YouTube en español. "
         "Genera UN SOLO título llamativo, claro y específico. "
-        "Reglas: máximo 70 caracteres, sin comillas, sin hashtags, sin emojis. "
+        "Reglas: sin comillas, sin hashtags, sin emojis. "
         "Debe ser apto para subir tal cual.\n"
         f"TEMA/BRIEF: {brief}\n"
         f"GUIÓN (resumen): {script_snip}\n\n"
@@ -1451,13 +2079,17 @@ def _prompt_titulo_youtube(brief: str, script_es: str) -> str:
 
 def generar_titulo_youtube(brief: str, script_es: str) -> str:
     prompt = _prompt_titulo_youtube(brief, script_es)
-    titulo = _ollama_generate_with_timeout(prompt, temperature=0.55, max_tokens=80, timeout_sec=max(OLLAMA_TIMEOUT, 60))
+    titulo = _ollama_generate_with_timeout(
+        prompt,
+        temperature=0.55,
+        max_tokens=180,
+        timeout_sec=max(OLLAMA_TIMEOUT, 60),
+        model=OLLAMA_TEXT_MODEL_SHORT,
+    )
     titulo = (titulo or "").strip().strip('"').strip("'")
     titulo = re.sub(r"\s+", " ", titulo).strip()
     if not titulo:
         raise RuntimeError("Ollama no devolvió un título")
-    if len(titulo) > 70:
-        titulo = titulo[:70].rstrip()
     return titulo
 
 
@@ -1524,7 +2156,13 @@ def _extraer_hashtags(text: str) -> list[str]:
 
 def _generar_hashtags_shorts(brief: str, title_es: str, script_es: str) -> list[str]:
     prompt = _prompt_hashtags_shorts(brief, title_es, script_es)
-    raw = _ollama_generate_with_timeout(prompt, temperature=0.35, max_tokens=60, timeout_sec=max(OLLAMA_TIMEOUT, 60))
+    raw = _ollama_generate_with_timeout(
+        prompt,
+        temperature=0.35,
+        max_tokens=60,
+        timeout_sec=max(OLLAMA_TIMEOUT, 60),
+        model=OLLAMA_TEXT_MODEL_SHORT,
+    )
     tags = _extraer_hashtags(raw)
 
                                                            
@@ -1552,29 +2190,45 @@ def _generar_hashtags_shorts(brief: str, title_es: str, script_es: str) -> list[
     return tags
 
 
-def _append_shorts_hashtags_to_title(title_es: str, *, brief: str, script_es: str, max_total_len: int = 100) -> str:
-    base = re.sub(r"\s+", " ", (title_es or "").strip())
+def _append_shorts_hashtags_to_title(title_es: str, *, brief: str, script_es: str) -> str:
+    raw = re.sub(r"\s+", " ", (title_es or "").strip())
+    if not raw:
+        raw = "Video personalizado"
+
+                                                                               
+    existing = _extraer_hashtags(raw)
+    base = re.sub(r"(?:\s*#[^\s#]+)+\s*$", "", raw).strip()
     if not base:
         base = "Video personalizado"
 
-                                                       
-    if "#" in base:
-        return base
+    if len(existing) >= 3:
+        return f"{base} {' '.join(existing[:5])}".strip()
 
     tags = _generar_hashtags_shorts(brief, base, script_es)
-    tags_str = " ".join(tags)
-    if not tags_str:
-        return base
+    merged: list[str] = []
+    seen = set()
+    for t in existing + tags:
+        h = _normalizar_hashtag(t)
+        if not h:
+            continue
+        if h in seen:
+            continue
+        seen.add(h)
+        merged.append(h)
+        if len(merged) >= 5:
+            break
 
-                                                                 
-    max_total_len = int(max_total_len or 100)
-    allowed_title_len = max(10, max_total_len - 1 - len(tags_str))
-    if len(base) > allowed_title_len:
-        base = base[:allowed_title_len].rstrip()
-                                                                       
-        base = base.rstrip("-:|,.;")
+                       
+    if len(merged) < 3:
+        for t in ("#shorts", "#curiosidades", "#datoscuriosos", "#viral", "#misterio"):
+            h = _normalizar_hashtag(t)
+            if h and h not in seen:
+                merged.append(h)
+                seen.add(h)
+            if len(merged) >= 3:
+                break
 
-    return f"{base} {tags_str}".strip()
+    return f"{base} {' '.join(merged[:5])}".strip()
 
 
 def _copiar_imagen_manual_a_segmento(carpeta: str, seg_index_1: int, src: str) -> str:
@@ -1659,20 +2313,33 @@ def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts:
     target_minutes = max(1, int(round(target_seconds / 60.0)))
 
     if target_seconds >= 300:
-        seg_min, seg_max = 12, 24
-        total_words_min, total_words_max = 850, 1200
-        per_seg_min, per_seg_max = 80, 140
+                                                                              
+                                                                                   
+        seg_min, seg_max = 12, 16
+        total_words_min, total_words_max = 650, 950
+        per_seg_min, per_seg_max = 45, 80
+        humor_line = "Incluye sarcasmo ligero y humor inteligente (1-2 chistes cortos por minuto, no stand-up). "
     else:
                                    
         seg_min, seg_max = 6, 10
         total_words_min, total_words_max = _target_word_range(target_seconds)
         per_seg_min, per_seg_max = 22, 55
 
+        humor_line = "Incluye sarcasmo ligero y 1-2 chistes cortos en total (breves, naturales). "
+
+    estilo_line = (
+        "Tono: energético y humano (no plano), con variaciones de ritmo y emoción (sorpresa, emoción, seriedad breve cuando toque). "
+        + humor_line
+        + "Evita groserías y humor ofensivo. No uses emojis. Usa signos ¿¡ cuando corresponda. "
+        "Mantén el contenido informativo y verificable: el humor es un condimento, no el objetivo."
+    )
+
     return (
         "Eres productor de YouTube en español. Diseña un video informativo, claro y carismático para retener audiencia. "
         "Usarás imágenes REALES de internet (no IA). Necesito que alinees guion, segmentos y qué debe verse en cada momento.\n"
         f"BRIEF: {brief}\n"
         f"DATOS RAPIDOS: {contexto_line}\n\n"
+        f"ESTILO: {estilo_line}\n\n"
         f"OBJETIVO: El guion narrado debe durar ~{target_seconds} segundos (~{target_minutes} min). "
         "NO rellenes con silencio: escribe contenido real.\n\n"
         "ESTRUCTURA OBLIGATORIA (en este orden):\n"
@@ -1680,9 +2347,19 @@ def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts:
         "2) Datos curiosos: entrega datos específicos, ejemplos, mini-historia o contexto; evita generalidades.\n"
         "3) Cierre: termina con un DATO CURIOSO FINAL memorable (incluye 'Dato curioso final:' o '¿Sabías que...?').\n"
         "PROHIBIDO: terminar con frases vagas tipo 'en este video exploramos el mundo mágico' sin dar un dato final.\n\n"
+        "Evita repeticiones: solo UNA bienvenida o introducción breve. No repitas frases como 'Bienvenidos', 'hoy exploraremos', 'en este video'. Cada segmento debe aportar un dato nuevo.\n"
+        "Evita redundancia: no repitas el mismo ejemplo/dato en más de un segmento. No rellenes con frases vacías. No repitas la misma pregunta retórica en varios segmentos.\n"
+        "Hook único: hook_es debe ser UNA sola frase corta, no un array.\n"
+        "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' una sola vez.\n\n"
+        "FORMATO DE RESPUESTA OBLIGATORIO:\n"
+        "- Responde SOLO con un objeto JSON válido, sin texto adicional antes o después.\n"
+        "- NO uses bloques de código markdown (```json o ```).\n"
+        "- NO agregues comas al final de la última propiedad en objetos o arrays.\n"
+        "- Escapa todas las comillas dobles dentro de las cadenas (usa \\\" ).\n"
+        "- Asegura que el JSON sea válido y parseable desde la primera línea hasta la última.\n\n"
         "Entrega SOLO JSON con estas claves:\n"
         "- title_es: titulo atractivo (<=80 chars).\n"
-        "- hook_es: 1-2 frases de gancho inmediato.\n"
+        "- hook_es: UNA sola frase de gancho inmediato (no lista).\n"
         f"- segments: lista de {seg_min}-{seg_max} objetos, estricto orden cronologico. Cada objeto: {{\n"
         f"    text_es: parte del guion en español ({per_seg_min}-{per_seg_max} palabras) para narrar en TTS;\n"
         "    image_query: frase corta en ingles para buscar foto real exacta (ej: 'elder wand prop from deathly hallows movie');\n"
@@ -1692,7 +2369,7 @@ def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts:
         "- script_es: concatenación de todos los text_es en orden, como guion completo.\n"
         "Reglas: prioriza objetos/lugares/personas reales, evita conceptos abstractos. Para nombres concretos (ej. 'varita de saúco') usa queries precisas del item real. "
         f"Verificación interna: el script_es final debe tener aprox {total_words_min}-{total_words_max} palabras. "
-        "JSON valido, nada mas."
+        "NO agregues comentarios adicionales, SOLO el objeto JSON válido."
     )
 
 
@@ -1703,6 +2380,8 @@ def _prompt_expand_to_min_duration(brief: str, contexto: str, plan_raw: Dict[str
     return (
         "Reescribe y EXPANDE el plan para cumplir duración mínima sin añadir relleno vacío. "
         "Mantén el mismo tema y estructura, pero agrega más segmentos y más detalle narrativo.\n"
+        "Tono: energético y humano (no plano), con sarcasmo ligero y chistes breves ocasionales (sin groserías ni humor ofensivo). "
+        "Usa variaciones de ritmo y emoción; no uses emojis.\n"
         f"BRIEF: {brief}\n"
         f"DATOS RAPIDOS: {contexto_line}\n"
         f"DURACION MINIMA: {min_seconds} segundos (>= {max(5, min_seconds//60)} minutos).\n"
@@ -1735,16 +2414,49 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     hook = ""
     script = ""
 
+    model_text = _text_model_for_seconds(target_seconds)
+    print(f"[CUSTOM] 🧠 Modelo texto por duración: {model_text} (target_seconds={target_seconds})")
+
+                                                           
+                                                                                      
+                                                                       
+                                                                            
+    if target_seconds >= 300:
+                                                                                  
+        tokens_limit = 3600 if "qwen" in model_text.lower() else 3400
+        timeout = 240
+        min_ctx = 6144 if "qwen" in model_text.lower() else 5632
+        print(f"[CUSTOM] 📝 Generando plan largo (~{target_seconds}s) (ctx={min_ctx}, tokens={tokens_limit})")
+    else:
+        tokens_limit = 2200
+        timeout = 160
+        min_ctx = None
+
+    timeout = max(OLLAMA_TIMEOUT, timeout)
+
     for _ in range(3):
         prompt = _prompt_plan(brief, contexto, target_seconds=target_seconds, max_prompts=max_prompts)
-        plan = _ollama_generate_json_with_timeout(prompt, temperature=0.62, max_tokens=2200, timeout_sec=max(OLLAMA_TIMEOUT, 160))
+        plan = _ollama_generate_json_with_timeout(
+            prompt,
+            temperature=0.58,                                  
+            max_tokens=tokens_limit,
+            timeout_sec=timeout,
+            min_ctx=min_ctx,
+            model=model_text,
+        )
 
         titulo = str(plan.get("title_es") or "").strip()
-        hook = str(plan.get("hook_es") or "").strip()
+        hook_val = plan.get("hook_es")
+        if isinstance(hook_val, list):
+            hook = str(hook_val[0] if hook_val else "").strip()
+        else:
+            hook = str(hook_val or "").strip()
+        plan["hook_es"] = hook
         script = str(plan.get("script_es") or "").strip()
 
         raw_segments = plan.get("segments") or []
         segmentos = []
+        seen = set()
         if isinstance(raw_segments, list):
             for s in raw_segments:
                 if not isinstance(s, dict):
@@ -1752,6 +2464,9 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 texto = str(s.get("text_es") or "").strip()
                 if not texto:
                     continue
+                if texto in seen:
+                    continue
+                seen.add(texto)
                 query = str(s.get("image_query") or "").strip()
                 iprompt = str(s.get("image_prompt") or "").strip() or query
                 note = str(s.get("note") or "").strip()
@@ -1761,6 +2476,11 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                     "image_prompt": iprompt,
                     "note": note,
                 })
+
+                                                                                                    
+        if segmentos:
+            script = " ".join(seg["text_es"] for seg in segmentos)
+            plan["script_es"] = script
 
         if not segmentos:
             continue
@@ -1776,7 +2496,14 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
         else:
             if seg_count < 6:
                 continue
-        if minw < 40:
+        if target_seconds >= 300 and minw < 25:
+            continue
+        if target_seconds < 300 and minw < 40:
+            continue
+
+        quality_issues = _plan_quality_issues(segmentos, target_seconds=target_seconds)
+        if quality_issues:
+            print(f"[CUSTOM] ⚠️ Plan rechazado por calidad: {', '.join(quality_issues)}")
             continue
         wmin, _wmax = _target_word_range(target_seconds)
         if total_words < int(wmin * 0.70):
@@ -1802,7 +2529,13 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
             n_segments = 6 if target_seconds >= 300 else 3
             last_note = str((segmentos[-1] or {}).get("note") or "").strip() if segmentos else ""
             add_prompt = _prompt_add_segments(brief, contexto, need_words=need_words, n_segments=n_segments, last_note=last_note)
-            raw = _ollama_generate_with_timeout(add_prompt, temperature=0.55, max_tokens=1800, timeout_sec=max(OLLAMA_TIMEOUT, 160))
+            raw = _ollama_generate_with_timeout(
+                add_prompt,
+                temperature=0.55,
+                max_tokens=1800,
+                timeout_sec=max(OLLAMA_TIMEOUT, 160),
+                model=model_text,
+            )
             try:
                 arr = _extract_json_array(raw)
             except Exception:
@@ -1811,7 +2544,13 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                     "You returned INVALID JSON array. Fix it and return ONLY a valid JSON array.\n"
                     "INVALID_JSON_START\n" + (raw or "")[:8000] + "\nINVALID_JSON_END\n"
                 )
-                raw2 = _ollama_generate_with_timeout(fix, temperature=0.2, max_tokens=1800, timeout_sec=max(OLLAMA_TIMEOUT, 160))
+                raw2 = _ollama_generate_with_timeout(
+                    fix,
+                    temperature=0.2,
+                    max_tokens=1800,
+                    timeout_sec=max(OLLAMA_TIMEOUT, 160),
+                    model=model_text,
+                )
                 arr = _extract_json_array(raw2)
 
             nuevos: List[Dict[str, Any]] = []
@@ -1928,12 +2667,17 @@ def generar_video_personalizado(
 
     textos = [s.get("text_es", "") for s in segmentos]
                                                                                      
-    queries = [
-        (str(s.get("image_query") or "").strip() or str(s.get("image_prompt") or "").strip() or brief)
-        for s in segmentos
-    ]
-
     notes = [str(s.get("note") or "").strip() for s in segmentos]
+    queries = []
+    for i, s in enumerate(segmentos):
+        base_q = (str(s.get("image_query") or "").strip() or str(s.get("image_prompt") or "").strip() or brief)
+        q2 = _build_better_image_query(
+            base_query=base_q,
+            text_es=str(s.get("text_es") or ""),
+            note=notes[i] if i < len(notes) else "",
+            brief=str(brief or "").strip(),
+        )
+        queries.append(q2)
 
                                                                                    
     imagenes, img_meta = descargar_mejores_imagenes_ddg(carpeta, queries, notes, max_per_query=8)
@@ -1957,9 +2701,16 @@ def generar_video_personalizado(
                 yt_title,
                 brief=str(plan.get("brief") or brief or "").strip(),
                 script_es=str(plan.get("script_es") or "").strip(),
-                max_total_len=100,
             )
         plan["youtube_title_es"] = yt_title
+
+                                                   
+        try:
+            yt_title_txt = os.path.join(carpeta, "youtube_title.txt")
+            with open(yt_title_txt, "w", encoding="utf-8") as f:
+                f.write(str(yt_title).strip() + "\n")
+        except Exception:
+            pass
     except Exception as e:
         print(f"[CUSTOM] ❌ No se pudo generar título YouTube: {e}")
         return False
@@ -2068,9 +2819,20 @@ def renderizar_video_personalizado_desde_plan(
         abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep)) if rel else ""
         if (not rel) or (not _es_imagen_valida(abs_path)):
             faltantes.append(i)
-            q = (str(seg.get("image_query") or "").strip() or str(seg.get("image_prompt") or "").strip() or str(plan.get("brief") or "").strip())
-            q_falt.append(q or "photo")
-            n_falt.append(str(seg.get("note") or "").strip())
+            base_q = (
+                str(seg.get("image_query") or "").strip()
+                or str(seg.get("image_prompt") or "").strip()
+                or str(plan.get("brief") or "").strip()
+            )
+            note = str(seg.get("note") or "").strip()
+            q2 = _build_better_image_query(
+                base_query=base_q or "photo",
+                text_es=str(seg.get("text_es") or ""),
+                note=note,
+                brief=str(plan.get("brief") or "").strip(),
+            )
+            q_falt.append(q2)
+            n_falt.append(note)
 
     if faltantes:
         print(f"[CUSTOM] ℹ️ Faltan imágenes en {len(faltantes)}/{len(segmentos)} segmentos. Intentando autodescarga...")
@@ -2133,6 +2895,44 @@ def renderizar_video_personalizado_desde_plan(
                 }
                 return cand
 
+                                                                                      
+        try:
+            cand_dir = os.path.join(carpeta_plan, "candidates")
+            if os.path.isdir(cand_dir):
+                names = sorted(os.listdir(cand_dir))
+                for n in names:
+                    if not n.startswith(seg_tag + "_"):
+                        continue
+                    absp = os.path.join(cand_dir, n)
+                    if not _es_imagen_valida(absp):
+                        continue
+                    ext = os.path.splitext(absp)[1].lower() or ".jpg"
+                    stable = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
+                    try:
+                        with open(absp, "rb") as src, open(stable, "wb") as dst:
+                            dst.write(src.read())
+                    except Exception:
+                        stable = absp
+
+                    rel = os.path.relpath(stable, carpeta_plan).replace("\\", "/")
+                    q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
+                    note = str(seg.get("note") or "").strip()
+                    seg["image_selection"] = {
+                        "query": q,
+                        "note": note,
+                        "candidates": [],
+                        "selected": {
+                            "candidate_index": None,
+                            "score": 1,
+                            "url": None,
+                            "title": "recovered_from_candidates",
+                            "path": rel,
+                        },
+                    }
+                    return stable
+        except Exception:
+            pass
+
         try:
             nombres = os.listdir(carpeta_plan)
         except Exception:
@@ -2167,6 +2967,26 @@ def renderizar_video_personalizado_desde_plan(
                 },
             }
             return stable
+                                                                    
+        ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
+        if ph:
+            rel = os.path.relpath(ph, carpeta_plan).replace("\\", "/")
+            q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
+            note = str(seg.get("note") or "").strip()
+            seg["image_selection"] = {
+                "query": q,
+                "note": note,
+                "candidates": [],
+                "selected": {
+                    "candidate_index": None,
+                    "score": 1,
+                    "url": None,
+                    "title": "placeholder",
+                    "path": rel,
+                },
+                "fallback": "placeholder",
+            }
+            return ph
         return None
     for i, seg in enumerate(segmentos, start=1):
         sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
@@ -2187,14 +3007,71 @@ def renderizar_video_personalizado_desde_plan(
                 return False
         abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep))
         if not _es_imagen_valida(abs_path):
-            print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
-            return False
+                                                                
+            seg_tag = f"seg_{i:02d}"
+            ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
+            if not ph:
+                print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
+                return False
+            rel_ph = os.path.relpath(ph, carpeta_plan).replace("\\", "/")
+            seg["image_selection"] = {
+                "query": str(seg.get("image_query") or seg.get("image_prompt") or "").strip(),
+                "note": str(seg.get("note") or "").strip(),
+                "candidates": [],
+                "selected": {
+                    "candidate_index": None,
+                    "score": 1,
+                    "url": None,
+                    "title": "placeholder_replacing_invalid",
+                    "path": rel_ph,
+                },
+                "fallback": "placeholder",
+            }
+            try:
+                plan["segments"] = segmentos
+                with open(plan_file, "w", encoding="utf-8") as f:
+                    json.dump(plan, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            abs_path = ph
         imagenes.append(abs_path)
 
                                                        
     textos = [str(s.get("text_es") or "") for s in segmentos]
     audios: List[str] = []
-    reuse_ok = True
+    force_regen = (os.environ.get("CUSTOM_FORCE_REGEN_TTS") or "").strip().lower() in {"1", "true", "yes", "si", "sí"}
+
+    if force_regen:
+                                                                                   
+                                             
+        borrados = 0
+        try:
+            for name in os.listdir(carpeta_plan):
+                low = name.lower()
+                if low.startswith("audio_") and (low.endswith(".mp3") or low.endswith(".wav")):
+                    try:
+                        os.remove(os.path.join(carpeta_plan, name))
+                        borrados += 1
+                    except Exception:
+                        pass
+                elif low.startswith("audio_norm_") and low.endswith(".wav"):
+                    try:
+                        os.remove(os.path.join(carpeta_plan, name))
+                        borrados += 1
+                    except Exception:
+                        pass
+                elif low == "audio_con_silencios.wav":
+                    try:
+                        os.remove(os.path.join(carpeta_plan, name))
+                        borrados += 1
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        if borrados:
+            print(f"[CUSTOM] INFO: Borrados {borrados} audios cacheados para regenerar TTS")
+
+    reuse_ok = not force_regen
     for i in range(len(textos)):
         p1 = os.path.join(carpeta_plan, f"audio_{i}.mp3")
         p2 = os.path.join(carpeta_plan, f"audio_{i}.wav")
@@ -2207,6 +3084,8 @@ def renderizar_video_personalizado_desde_plan(
             break
 
     if not reuse_ok:
+        if force_regen:
+            print("[CUSTOM] INFO: Regenerando TTS (CUSTOM_FORCE_REGEN_TTS=1)")
         audios = tts.generar_audios(textos, carpeta_plan, voz=voz, velocidad=velocidad)
         if len(audios) != len(textos):
             print("[CUSTOM] ❌ No se pudieron generar todos los audios")

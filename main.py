@@ -24,7 +24,8 @@ from utils import topic_importer
                                                    
                                                                                                
 VOZ = "es-MX-JorgeNeural"
-VELOCIDAD = "-15%"                          
+                                                
+VELOCIDAD = "-10%"                                                
 
                                                                        
                                                                                                 
