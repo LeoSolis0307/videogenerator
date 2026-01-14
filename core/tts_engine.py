@@ -35,6 +35,35 @@ EDGE_TTS_STYLE = (os.environ.get("EDGE_TTS_STYLE") or "").strip()
 EDGE_TTS_STYLE_DEGREE = (os.environ.get("EDGE_TTS_STYLE_DEGREE") or "").strip()
 
 
+                                                                                    
+                                                                                      
+EDGE_TTS_EMOTION = (os.environ.get("EDGE_TTS_EMOTION") or "1").strip().lower()                
+try:
+    EDGE_TTS_EMOTION_INTENSITY = float(os.environ.get("EDGE_TTS_EMOTION_INTENSITY") or "3.0")
+except Exception:
+    EDGE_TTS_EMOTION_INTENSITY = 3.0
+
+                                                                 
+try:
+    EDGE_TTS_HOOK_BOOST = float(os.environ.get("EDGE_TTS_HOOK_BOOST") or "1.8")
+except Exception:
+    EDGE_TTS_HOOK_BOOST = 1.8
+try:
+    EDGE_TTS_MID_BOOST = float(os.environ.get("EDGE_TTS_MID_BOOST") or "1.0")
+except Exception:
+    EDGE_TTS_MID_BOOST = 1.0
+try:
+    EDGE_TTS_END_BOOST = float(os.environ.get("EDGE_TTS_END_BOOST") or "1.4")
+except Exception:
+    EDGE_TTS_END_BOOST = 1.4
+
+                                                           
+try:
+    EDGE_TTS_MAX_CHUNKS = int(os.environ.get("EDGE_TTS_MAX_CHUNKS") or "6")
+except Exception:
+    EDGE_TTS_MAX_CHUNKS = 6
+
+
 def _parece_voz_edge(voz: str | None) -> bool:
     if not voz:
         return False
@@ -110,6 +139,151 @@ def _split_text(texto: str, max_chars: int = 500) -> list[str]:
             for i in range(0, len(c), max_chars):
                 final.append(c[i : i + max_chars])
     return final
+
+
+def _parse_pct(s: str, *, default: float = 0.0) -> float:
+    v = (s or "").strip()
+    if not v:
+        return float(default)
+    if v.endswith("%"):
+        v = v[:-1]
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
+
+
+def _format_pct(x: float) -> str:
+                                                  
+    x2 = int(round(float(x)))
+    sign = "+" if x2 >= 0 else ""
+    return f"{sign}{x2}%"
+
+
+def _format_hz(x: float) -> str:
+                                                         
+    x2 = int(round(float(x)))
+    sign = "+" if x2 >= 0 else ""
+    return f"{sign}{x2}Hz"
+
+
+def _ffmpeg_exists() -> bool:
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=6)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _concat_mp3s_ffmpeg(inputs: list[str], output: str) -> bool:
+    if not inputs:
+        return False
+    if len(inputs) == 1:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+            if os.path.abspath(inputs[0]) != os.path.abspath(output):
+                if os.path.exists(output):
+                    os.remove(output)
+                os.replace(inputs[0], output)
+            return os.path.exists(output) and os.path.getsize(output) > 0
+        except Exception:
+            return False
+
+    if not _ffmpeg_exists():
+        return False
+
+                                                
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".txt") as f:
+        list_path = f.name
+        for p in inputs:
+            ap = os.path.abspath(p).replace("\\\\", "/")
+            f.write(f"file '{ap}'\n")
+
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_path,
+            "-c",
+            "copy",
+            output,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if r.returncode != 0:
+            return False
+        return os.path.exists(output) and os.path.getsize(output) > 0
+    except Exception:
+        return False
+    finally:
+        try:
+            os.remove(list_path)
+        except Exception:
+            pass
+
+
+def _edge_emotion_params(
+    *,
+    chunk_index: int,
+    chunk_count: int,
+    base_rate: str,
+    intensity: float,
+) -> tuple[str, str, str]:
+    \
+\
+\
+\
+\
+\
+    base = _parse_pct(base_rate, default=-10.0)
+
+                                                                       
+                                                 
+    k = max(0.0, float(intensity))
+    amp_rate = 4.0 * k               
+    amp_pitch = 6.0 * k                
+    amp_vol = 2.0 * k              
+
+    phase = chunk_index % 4
+    if phase == 0:
+        dr, dp, dv = +amp_rate, +amp_pitch, +amp_vol
+    elif phase == 1:
+        dr, dp, dv = -amp_rate * 0.70, -amp_pitch * 0.60, 0.0
+    elif phase == 2:
+        dr, dp, dv = +amp_rate * 0.60, +amp_pitch * 0.30, +amp_vol * 0.40
+    else:
+        dr, dp, dv = -amp_rate * 0.40, -amp_pitch * 0.20, 0.0
+
+                                                              
+    rate = max(-30.0, min(20.0, base + dr))
+    pitch = max(-24.0, min(24.0, dp))
+    vol = max(-10.0, min(10.0, dv))
+
+    return _format_pct(rate), _format_hz(pitch), _format_pct(vol)
+
+
+def _segment_intensity(total_segments: int, seg_index: int) -> float:
+    \
+\
+\
+\
+\
+\
+    n = max(1, int(total_segments))
+    i = int(seg_index)
+    if i <= 0:
+        return float(EDGE_TTS_HOOK_BOOST)
+    if i >= n - 1:
+        return float(EDGE_TTS_END_BOOST)
+    return float(EDGE_TTS_MID_BOOST)
 
 
 _URL_RE = re.compile(r"(?i)(?:https?://|www\.)\S+")
@@ -358,6 +532,7 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad):
         print("[TTS-EDGE] WARNING: Estilos SSML desactivados (edge-tts escapa el input y se narran los tags).")
     print(f"[TTS-EDGE] Generando {len(textos)} audios con {voz} (rate {velocidad})...")
 
+    total_textos = len(textos)
     for i, texto in enumerate(textos):
         nombre_archivo = f"audio_{i}.mp3"
         ruta_completa = os.path.join(carpeta, nombre_archivo)
@@ -366,12 +541,85 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad):
         texto_in = _strip_ssml(texto_in)
         texto_in = _strip_urls(texto_in)
 
+                                                                       
+        emotion_on = EDGE_TTS_EMOTION in {"1", "true", "yes", "si", "sí", "on"}
+        max_chunks = max(1, int(EDGE_TTS_MAX_CHUNKS))
+
+                                                             
+        base_k = float(EDGE_TTS_EMOTION_INTENSITY)
+        boost = _segment_intensity(total_textos, i)
+                                                                     
+        k_seg = max(0.0, min(6.0, base_k * max(0.0, boost)))
+
+        chunks = [texto_in]
+        if emotion_on:
+                                                                                           
+            chunks = _split_text(texto_in, max_chars=180)
+            chunks = [c for c in chunks if c.strip()]
+            if len(chunks) > max_chunks:
+                chunks = chunks[:max_chunks]
+            if not chunks:
+                chunks = [texto_in]
+
+        part_paths: list[str] = []
+
         for intento in range(3):
             try:
+                                                                   
+                                              
+                for p in part_paths:
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                part_paths = []
+
                 await asyncio.sleep(random.uniform(2.0, 4.0))
-                communicate = edge_tts.Communicate(texto_in, voz, rate=velocidad)
-                await communicate.save(ruta_completa)
-                if os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0:
+
+                for j, ch in enumerate(chunks):
+                    part = os.path.join(carpeta, f"audio_{i}_part{j}.mp3")
+                    rate_j, pitch_j, vol_j = _edge_emotion_params(
+                        chunk_index=j,
+                        chunk_count=len(chunks),
+                        base_rate=velocidad,
+                        intensity=k_seg,
+                    )
+
+                                                                                                    
+                    try:
+                        communicate = edge_tts.Communicate(ch, voz, rate=rate_j, pitch=pitch_j, volume=vol_j)
+                    except TypeError:
+                        communicate = edge_tts.Communicate(ch, voz, rate=rate_j)
+
+                    await communicate.save(part)
+                    if not (os.path.exists(part) and os.path.getsize(part) > 0):
+                        raise RuntimeError("Parte vacía")
+                    part_paths.append(part)
+
+                                                   
+                ok = _concat_mp3s_ffmpeg(part_paths, ruta_completa)
+                if not ok:
+                                                                                                       
+                    if part_paths:
+                        try:
+                            if os.path.exists(ruta_completa):
+                                os.remove(ruta_completa)
+                            os.replace(part_paths[0], ruta_completa)
+                            part_paths = part_paths[1:]
+                            ok = os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0
+                        except Exception:
+                            ok = False
+
+                                              
+                for p in part_paths:
+                    try:
+                        if os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+
+                if ok:
                     archivos_audio.append(ruta_completa)
                     print(f"   - Audio {i+1}/{len(textos)} generado.")
                     break

@@ -450,6 +450,87 @@ def _sanitize_brief_for_duration(brief: str) -> str:
     return b
 
 
+def _extract_hook_from_brief(brief: str) -> str:
+    \
+    b = (brief or "").strip()
+    if not b:
+        return ""
+    m = re.search(r"(?is)\bgancho\s*:\s*\"([^\"]{6,220})\"", b)
+    if not m:
+        return ""
+    hook = (m.group(1) or "").strip()
+    hook = re.sub(r"\s+", " ", hook)
+    return hook
+
+
+def _tiene_saludo_o_outro(texto: str) -> bool:
+    t = (texto or "").strip().lower()
+    if not t:
+        return False
+                                             
+    bad = [
+        "hola",
+        "hey",
+        "buenas",
+        "qué tal",
+        "que tal",
+        "bienvenid",
+        "en este video",
+        "en este vídeo",
+        "hoy vamos",
+        "hoy te",
+        "hoy les",
+        "suscr",
+        "dale like",
+        "like y",
+        "comenta",
+        "sígueme",
+        "sigueme",
+    ]
+    return any(x in t for x in bad)
+
+
+def _prompt_rewrite_opening_segment(
+    brief: str,
+    contexto: str,
+    hook_es: str,
+    first_segment: Dict[str, Any],
+    *,
+    target_seconds: int,
+) -> str:
+    contexto_line = contexto if contexto else "Sin contexto web disponible."
+    seg_json = json.dumps(first_segment or {}, ensure_ascii=False)[:1500]
+
+                                                          
+    if int(target_seconds) >= 300:
+        wmin, wmax = 45, 85
+    else:
+        wmin, wmax = 24, 55
+
+    hook_line = (hook_es or "").strip()
+    if hook_line:
+        hook_line = re.sub(r"\s+", " ", hook_line)
+
+    return (
+        "Eres guionista de YouTube Shorts en español especializado en RETENCIÓN. "
+        "Reescribe SOLO el PRIMER segmento para que sea un HOOK agresivo y curioso. "
+        "Debe enganchar en 1 segundo, sin saludos ni introducciones flojas.\n"
+        f"BRIEF: {brief}\n"
+        f"DATOS RAPIDOS: {contexto_line}\n"
+        f"HOOK_OBLIGATORIO: {hook_line}\n"
+        f"SEGMENTO_ACTUAL_JSON: {seg_json}\n\n"
+        "REGLAS ESTRICTAS:\n"
+        "- text_es DEBE EMPEZAR EXACTAMENTE con HOOK_OBLIGATORIO (primera oración).\n"
+        "- PROHIBIDO: 'hola', 'bienvenidos', 'hoy', 'en este video', 'suscríbete', 'dale like'.\n"
+        "- Abre un 'open loop': deja algo pendiente que se resuelve en el siguiente segmento.\n"
+        "- Frases cortas, ritmo rápido, cero relleno.\n"
+        "- Mantén el mismo tema; no inventes afirmaciones dudosas.\n\n"
+        "Devuelve SOLO un objeto JSON con claves exactas: text_es, image_query, image_prompt, note. "
+        f"text_es debe tener {wmin}-{wmax} palabras. "
+        "JSON válido, nada más."
+    )
+
+
 def _words(text: str) -> int:
     return len((text or "").split())
 
@@ -484,10 +565,16 @@ def _plan_quality_issues(segmentos: List[Dict[str, Any]], *, target_seconds: int
 
                          
     lowered = [t.lower() for t in texts]
+
+                                                                                
+    if texts:
+        first = texts[0]
+        if _tiene_saludo_o_outro(first):
+            issues.append("saludo_en_hook")
     intro_hits = sum(
         1
         for t in lowered
-        if any(x in t for x in ["bienvenid", "hoy", "en este video", "en este vídeo", "hoy vamos"])
+        if any(x in t for x in ["hola", "bienvenid", "hoy", "en este video", "en este vídeo", "hoy vamos"])
     )
     if intro_hits > 1:
         issues.append("intro_repetida")
@@ -2307,7 +2394,14 @@ def _buscar_contexto_web(query: str, *, max_snippets: int = 4) -> str:
     return " ".join(textos[:max_snippets]).strip()
 
 
-def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts: int = 12) -> str:
+def _prompt_plan(
+    brief: str,
+    contexto: str,
+    *,
+    target_seconds: int,
+    max_prompts: int = 12,
+    hook_hint: str = "",
+) -> str:
     contexto_line = contexto if contexto else "Sin contexto web disponible, apóyate en conocimiento general y datos comprobables."
     target_seconds = int(max(15, target_seconds))
     target_minutes = max(1, int(round(target_seconds / 60.0)))
@@ -2334,11 +2428,20 @@ def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts:
         "Mantén el contenido informativo y verificable: el humor es un condimento, no el objetivo."
     )
 
+    hook_hint = re.sub(r"\s+", " ", (hook_hint or "").strip())
+    hook_line = f"GANCHO_OBLIGATORIO (si aplica): {hook_hint}\n" if hook_hint else ""
+
     return (
-        "Eres productor de YouTube en español. Diseña un video informativo, claro y carismático para retener audiencia. "
+        "Eres productor de YouTube Shorts en español. Diseña un video informativo, claro y carismático para retener audiencia. "
         "Usarás imágenes REALES de internet (no IA). Necesito que alinees guion, segmentos y qué debe verse en cada momento.\n"
         f"BRIEF: {brief}\n"
         f"DATOS RAPIDOS: {contexto_line}\n\n"
+        + hook_line
+        + "REGLAS DE RETENCION (CRITICAS):\n"
+        "- PROHIBIDO en el inicio: 'hola', 'bienvenidos', 'hoy te voy a', 'en este video', 'suscríbete', 'dale like'.\n"
+        "- El PRIMER segmento (segments[0].text_es) debe empezar fuerte: una afirmación impactante + curiosidad (open loop).\n"
+        "- Si se proporciona GANCHO_OBLIGATORIO, hook_es DEBE ser exactamente ese texto y el primer segmento DEBE arrancar con esa frase.\n"
+        "- Ritmo: frases cortas, cero relleno. Cada segmento aporta un dato NUEVO (no reexplicar).\n\n"
         f"ESTILO: {estilo_line}\n\n"
         f"OBJETIVO: El guion narrado debe durar ~{target_seconds} segundos (~{target_minutes} min). "
         "NO rellenes con silencio: escribe contenido real.\n\n"
@@ -2347,7 +2450,7 @@ def _prompt_plan(brief: str, contexto: str, *, target_seconds: int, max_prompts:
         "2) Datos curiosos: entrega datos específicos, ejemplos, mini-historia o contexto; evita generalidades.\n"
         "3) Cierre: termina con un DATO CURIOSO FINAL memorable (incluye 'Dato curioso final:' o '¿Sabías que...?').\n"
         "PROHIBIDO: terminar con frases vagas tipo 'en este video exploramos el mundo mágico' sin dar un dato final.\n\n"
-        "Evita repeticiones: solo UNA bienvenida o introducción breve. No repitas frases como 'Bienvenidos', 'hoy exploraremos', 'en este video'. Cada segmento debe aportar un dato nuevo.\n"
+        "Evita repeticiones: cero saludos; cero muletillas tipo 'hoy exploraremos'/'en este video'. Cada segmento debe aportar un dato nuevo.\n"
         "Evita redundancia: no repitas el mismo ejemplo/dato en más de un segmento. No rellenes con frases vacías. No repitas la misma pregunta retórica en varios segmentos.\n"
         "Hook único: hook_es debe ser UNA sola frase corta, no un array.\n"
         "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' una sola vez.\n\n"
@@ -2404,6 +2507,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     if target_seconds not in (60, 300):
         target_seconds = max(60, target_seconds)
     brief = _sanitize_brief_for_duration(brief_in) or brief_in
+    hook_hint = _extract_hook_from_brief(brief_in)
 
     contexto = _buscar_contexto_web(brief)
 
@@ -2435,7 +2539,13 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     timeout = max(OLLAMA_TIMEOUT, timeout)
 
     for _ in range(3):
-        prompt = _prompt_plan(brief, contexto, target_seconds=target_seconds, max_prompts=max_prompts)
+        prompt = _prompt_plan(
+            brief,
+            contexto,
+            target_seconds=target_seconds,
+            max_prompts=max_prompts,
+            hook_hint=hook_hint,
+        )
         plan = _ollama_generate_json_with_timeout(
             prompt,
             temperature=0.58,                                  
@@ -2451,6 +2561,10 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
             hook = str(hook_val[0] if hook_val else "").strip()
         else:
             hook = str(hook_val or "").strip()
+
+                                                                                        
+        if hook_hint:
+            hook = hook_hint
         plan["hook_es"] = hook
         script = str(plan.get("script_es") or "").strip()
 
@@ -2513,6 +2627,40 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
     if not plan or not segmentos:
         raise RuntimeError("El plan no devolvió 'segments' válidos")
+
+                                                                                   
+    try:
+        if segmentos and _tiene_saludo_o_outro(str(segmentos[0].get("text_es") or "")):
+            opener_prompt = _prompt_rewrite_opening_segment(
+                brief,
+                contexto,
+                hook,
+                segmentos[0],
+                target_seconds=target_seconds,
+            )
+            opener_obj = _ollama_generate_json_with_timeout(
+                opener_prompt,
+                temperature=0.25,
+                max_tokens=520,
+                timeout_sec=max(OLLAMA_TIMEOUT, 120),
+            )
+            if isinstance(opener_obj, dict):
+                texto = str(opener_obj.get("text_es") or "").strip()
+                if texto and not _tiene_saludo_o_outro(texto):
+                    segmentos[0]["text_es"] = texto
+                    q = str(opener_obj.get("image_query") or "").strip()
+                    ip = str(opener_obj.get("image_prompt") or "").strip()
+                    nt = str(opener_obj.get("note") or "").strip()
+                    if q:
+                        segmentos[0]["image_query"] = q
+                    if ip:
+                        segmentos[0]["image_prompt"] = ip
+                    if nt:
+                        segmentos[0]["note"] = nt
+                    script = " ".join([s.get("text_es", "") for s in segmentos]).strip()
+                    plan["script_es"] = script
+    except Exception:
+        pass
 
     if not script:
         script = " ".join([s.get("text_es", "") for s in segmentos]).strip()
