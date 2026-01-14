@@ -860,10 +860,44 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
     cfg = _encoding_cfg()
     fps = cfg["fps"]
 
+                                                    
+                                                                                    
+                                                                                  
     per_dur: list[float] = []
-    for idx, img in enumerate(imagenes_ok):
-        dur_val = max(0.5, float(dur_list[idx])) if dur_list else max(0.5, float(tiempo_img))
-        per_dur.append(dur_val)
+    if dur_list:
+        for idx in range(len(imagenes_ok)):
+            per_dur.append(max(0.5, float(dur_list[idx])))
+    else:
+        for _ in range(len(imagenes_ok)):
+            per_dur.append(max(0.5, float(tiempo_img)))
+
+    try:
+        dur_audio_real = max(0.0, _audio_duration_seconds(audio_abs))
+    except Exception:
+        dur_audio_real = 0.0
+
+    total_video = sum(per_dur)
+
+                                                                                     
+                                                                  
+    overlap = 0.0
+    if len(per_dur) > 1 and XF_MS > 0:
+        raw_fade = max(0.02, float(XF_MS) / 1000.0)
+        fps_num = float(fps)
+        fade_frames = max(1, int(round(fps_num * raw_fade)))
+        fade_dur = float(fade_frames) / fps_num
+        overlap = (len(per_dur) - 1) * fade_dur
+
+    effective_video = total_video - overlap
+    if dur_audio_real > 0 and effective_video + 0.02 < dur_audio_real:
+        extra = (dur_audio_real - effective_video) + 0.10
+        per_dur[-1] += extra
+        print(
+            f"[VIDEO] Ajuste anti-recorte: extendiendo última imagen +{extra:.2f}s "
+            f"(video efectivo {effective_video:.2f}s < audio {dur_audio_real:.2f}s; overlap~{overlap:.2f}s)"
+        )
+
+    for idx, (img, dur_val) in enumerate(zip(imagenes_ok, per_dur)):
                                                                                              
         inputs.extend(["-i", _ffmpeg_path(img)])
 
