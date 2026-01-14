@@ -1,9 +1,13 @@
 .env
 output/
 
+media/
+
 .venv/
 __pycache__/
 *.pyc
+
+storage/app.db
 
 .pytest_cache/
 .mypy_cache/
