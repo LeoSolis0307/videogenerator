@@ -28,11 +28,6 @@ def _api(path: str) -> str:
 
 
 def try_unload_model(model: str, *, timeout_sec: int = 20) -> bool:
-    \
-\
-\
-\
-\
     name = (model or "").strip()
     if not name:
         return False

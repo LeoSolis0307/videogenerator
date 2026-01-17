@@ -9,11 +9,14 @@
 Requisitos:
 
 - Python 3.11
-- FFmpeg instalado y en PATH
+- FFmpeg (si no lo tenés en PATH, el proyecto usa el binario de `imageio-ffmpeg` al instalar dependencias)
 
 Ejecutar:
 
 ```bash
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 python main.py
 ```
 

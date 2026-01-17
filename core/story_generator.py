@@ -7,6 +7,7 @@ from typing import List, Tuple
 import requests
 
 from utils.fs import asegurar_directorio, guardar_texto
+from core.ollama_metrics import maybe_print_ollama_speed
 
 DB_PATH = "storage/historias_gpt.json"
                                                                 
@@ -266,6 +267,7 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
             if resp.status_code >= 400:
                 raise RuntimeError(_http_error_message(resp))
             data = resp.json()
+            maybe_print_ollama_speed(data, tag="GPT")
             if "response" not in data:
                 raise RuntimeError("Respuesta de Ollama sin 'response'")
             return (data.get("response") or "").strip()
@@ -288,7 +290,6 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
 
 
 def _refinar_historia(texto: str, genero: str) -> str:
-    \
     texto = (texto or "").strip()
     if not texto:
         return texto
@@ -378,7 +379,6 @@ def _guardar_historia(texto: str, genero: str, idx: int) -> str:
 
 
 def generar_historias(genero: str, cantidad: int) -> List[Tuple[str, str]]:
-    \
     data = _load_db()
     hashes = _db_hashes(data)
     aceptadas: List[Tuple[str, str]] = []

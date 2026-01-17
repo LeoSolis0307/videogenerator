@@ -8,6 +8,8 @@ import shutil
 from PIL import Image
 import requests
 
+from core.ollama_metrics import maybe_print_ollama_speed
+
                         
 COMFY_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_WORKFLOW = os.environ.get("COMFYUI_WORKFLOW", "api_bytedance_seedream4.json")
@@ -71,15 +73,12 @@ def _ollama_generar_json(prompt: str) -> dict:
     resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
     resp.raise_for_status()
     data = resp.json()
+    maybe_print_ollama_speed(data, tag="IMG")
     text = (data.get("response") or "").strip()
     return json.loads(text)
 
 
 def generar_prompts_historia(historia: str, *, max_prompts: int = 12) -> list[str]:
-    \
-\
-\
-\
     historia = (historia or "").strip()
     if not historia:
         return PROMPTS
@@ -237,7 +236,6 @@ def _generar_imagen_comfy(prompt: str, carpeta: str, idx: int, workflow_base: di
 
 
 def generar_imagen_prueba(prompt: str, carpeta: str) -> str | None:
-    \
     prompt = (prompt or "").strip() or random.choice(PROMPTS)
     workflow = _comfy_workflow_cargado()
     if not workflow:
@@ -259,10 +257,6 @@ def descargar_imagenes(carpeta, cantidad):
 
 
 def descargar_imagenes_desde_prompts(carpeta: str, prompts: list[str], *, dur_audio: float | None) -> list[str]:
-    \
-\
-\
-\
     print("[IMG] Descargando imágenes desde prompts...")
     workflow = _comfy_workflow_cargado()
     if not workflow:

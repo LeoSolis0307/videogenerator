@@ -284,14 +284,6 @@ def find_similar_topic(
     db_path: str = DB_PATH_DEFAULT,
     threshold: float = 0.80,
 ) -> TopicMatch | None:
-\
-\
-\
-\
-\
-\
-\
-\
 
     init_db(db_path)
 
@@ -360,10 +352,6 @@ def register_topic_if_new(
     video_path: str | None = None,
     threshold: float = 0.98,
 ) -> int | None:
-    \
-\
-\
-\
     existing = find_similar_topic(text, kind=kind, db_path=db_path, threshold=threshold)
     if existing is not None:
         return None

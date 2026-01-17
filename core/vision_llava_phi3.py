@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from core.ollama_metrics import maybe_print_ollama_speed
+
                                         
                                                                                   
                                                                                                   
@@ -18,6 +20,7 @@ VISION_TIMEOUT_SEC = int(os.environ.get("VISION_TIMEOUT_SEC", "90") or "90")
 VISION_RETRIES = int(os.environ.get("VISION_RETRIES", "3") or "3")
 
 _DEBUG_IMG_VALIDATION = (os.environ.get("DEBUG_IMG_VALIDATION") or "").strip() in {"1", "true", "True", "YES", "yes"}
+_VISION_PRINT_SPEED = (os.environ.get("VISION_PRINT_SPEED") or "").strip().lower() in {"1", "true", "yes", "si", "sí", "on"}
 
                                                                            
 _AVAILABLE: bool | None = None
@@ -70,11 +73,6 @@ def score_image(
     timeout_sec: int | None = None,
     retries: int | None = None,
 ) -> int:
-    \
-\
-\
-\
-\
     global _AVAILABLE
 
     if _AVAILABLE is False:
@@ -136,6 +134,7 @@ def score_image(
             r = requests.post(api_chat, json=payload, timeout=timeout)
             r.raise_for_status()
             data = r.json() if r.content else {}
+            maybe_print_ollama_speed(data, tag="VISION", enabled=_VISION_PRINT_SPEED)
             _AVAILABLE = True
             ans = str((data.get("message") or {}).get("content") or "").strip().upper()
             if _DEBUG_IMG_VALIDATION:

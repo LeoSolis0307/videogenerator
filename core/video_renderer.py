@@ -29,19 +29,6 @@ VIDEO_BLUR = (os.environ.get("VIDEO_BLUR") or "10:1").strip()
 
 
 def _encoding_cfg() -> dict:
-    \
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
-\
     quality = (os.environ.get("VIDEO_QUALITY") or "").strip().lower()
 
                                       
@@ -199,11 +186,6 @@ def _png_signature_ok(path: str) -> bool:
         return False
 
 def _looks_like_avif_container(path: str) -> bool:
-    \
-\
-\
-\
-\
     try:
         if not path or not os.path.exists(path):
             return False
@@ -261,16 +243,6 @@ def _sanitize_image_for_ffmpeg(
     idx: int,
     report: list[dict] | None = None,
 ) -> str:
-    \
-\
-\
-\
-\
-\
-\
-\
-\
-\
     def _add_report(status: str, used: str, note: str | None = None) -> None:
         if report is None:
             return
@@ -482,12 +454,10 @@ def _audio_duration_seconds(path: str) -> float:
 
 
 def audio_duration_seconds(path: str) -> float:
-    \
     return _audio_duration_seconds(path)
 
 
 def _debug_dump_duration(path: str):
-    \
     print(f"[VIDEO-DEBUG] Dump de duración para: {path}")
     try:
         ffmpeg_bin = _pick_ffmpeg()
@@ -515,10 +485,6 @@ def _debug_dump_duration(path: str):
 
 
 def _pick_video_file(videos_dir: str | None = None) -> str | None:
-    \
-\
-\
-\
     base = videos_dir or DEFAULT_VIDEOS_DIR
     base_abs = os.path.abspath(base)
     if not os.path.isdir(base_abs):
@@ -549,7 +515,6 @@ def _pick_video_file(videos_dir: str | None = None) -> str | None:
 
 
 def select_video_base(videos_dir: str | None = None) -> tuple[str | None, float]:
-    \
     ruta = _pick_video_file(videos_dir)
     if not ruta:
         return None, 0.0
@@ -561,12 +526,6 @@ def select_video_base(videos_dir: str | None = None) -> tuple[str | None, float]
 
 
 def _calc_speed_and_padding(video_dur: float, audio_dur: float, *, max_speed: float = 2.5) -> tuple[float, float]:
-    \
-\
-\
-\
-\
-\
     if audio_dur <= 0 or video_dur <= 0:
         return 1.0, 0.0
 
@@ -589,12 +548,6 @@ def _calc_speed_and_padding(video_dur: float, audio_dur: float, *, max_speed: fl
 
 
 def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida: str, *, videos_dir: str | None = None):
-    \
-\
-\
-\
-\
-\
     ffmpeg = _pick_ffmpeg()
 
     video_fs = video_path or _pick_video_file(videos_dir)
@@ -713,11 +666,6 @@ def _normalize_audio_to_wav(src: str, dst: str, *, rate: int = 48000, channels: 
 
 
 def combine_audios_with_silence(audios, carpeta, gap_seconds=4, *, min_seconds: int | None = MIN_VIDEO_SEC, max_seconds: int | None = MAX_VIDEO_SEC):
-    \
-\
-\
-\
-\
     if not audios:
         raise ValueError("[AUDIO] Lista de audios vacía")
 

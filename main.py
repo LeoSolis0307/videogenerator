@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import time
 
 from core import custom_video, image_downloader, reddit_scraper, story_generator, text_processor, tts
 from core import topic_db
@@ -54,14 +55,6 @@ def _pedir_entero(mensaje: str, *, minimo: int = 1, default: int = 1) -> int:
 
 
 def _parse_indices_csv(raw: str, *, max_index: int) -> list[int]:
-    \
-\
-\
-\
-\
-\
-\
-\
     raw = (raw or "").strip()
     if not raw:
         return []
@@ -198,8 +191,57 @@ def _seleccionar_genero() -> str:
     return genero
 
 
+def _es_si(raw: str) -> bool:
+    return (raw or "").strip().lower() in {"s", "si", "sí", "y", "yes", "1", "true"}
+
+
+class _WindowsKeepAwake:
+    def __init__(self, *, enabled: bool = True) -> None:
+        self._enabled = bool(enabled)
+        self._ok = False
+        self._kernel32 = None
+
+    def __enter__(self):
+        if (not self._enabled) or os.name != "nt":
+            return self
+        try:
+            import ctypes
+
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+
+            self._kernel32 = ctypes.windll.kernel32
+            self._kernel32.SetThreadExecutionState(flags)
+            self._ok = True
+        except Exception:
+            self._ok = False
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if (not self._enabled) or os.name != "nt":
+            return False
+        if not self._ok:
+            return False
+        try:
+            import ctypes
+
+            ES_CONTINUOUS = 0x80000000
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        except Exception:
+            pass
+        return False
+
+
+def _start_cancel_suspend_listener(flag: dict) -> None:
+    return
+
+
+def _maybe_suspend_with_grace(cancel_flag: dict, *, grace_seconds: int = 60) -> None:
+    return
+
+
 def _planes_pendientes() -> list[str]:
-    \
     pendientes = []
     base = os.path.abspath("output")
     if not os.path.isdir(base):
@@ -219,7 +261,6 @@ def _planes_pendientes() -> list[str]:
 
 
 def _custom_plans_pendientes() -> list[str]:
-    \
     pendientes: list[str] = []
     base = os.path.abspath("output")
     if not os.path.isdir(base):
@@ -231,14 +272,105 @@ def _custom_plans_pendientes() -> list[str]:
         if name.startswith("0"):
             continue
         plan_file = os.path.join(entry.path, "custom_plan.json")
-        if os.path.exists(plan_file):
+        if not os.path.exists(plan_file):
+            continue
+
+
+        done = False
+        finalized = False
+        try:
+            with open(plan_file, "r", encoding="utf-8") as f:
+                plan = json.load(f) or {}
+            done = bool(plan.get("render_done"))
+            finalized = bool(plan.get("topic_finalized"))
+        except Exception:
+            done = False
+            finalized = False
+
+        if not done:
+            try:
+                vf = os.path.join(entry.path, "Video_Final.mp4")
+                if os.path.exists(vf) and os.path.getsize(vf) > 250_000:
+                    done = True
+            except Exception:
+                pass
+
+        
+        # Pendiente si:
+        # - falta render, o
+        # - ya renderizó pero falta finalizar (DB/archivo)
+        if (not done) or (done and not finalized):
             pendientes.append(entry.path)
+
     pendientes.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return pendientes
 
 
+def _custom_plan_flags(ruta: str) -> dict:
+    plan_path = os.path.join(ruta, "custom_plan.json")
+    rendered = False
+    finalized = False
+    try:
+        if os.path.exists(plan_path):
+            with open(plan_path, "r", encoding="utf-8") as f:
+                plan = json.load(f) or {}
+            rendered = bool(plan.get("render_done"))
+            finalized = bool(plan.get("topic_finalized"))
+    except Exception:
+        pass
+    if not rendered:
+        try:
+            vf = os.path.join(ruta, "Video_Final.mp4")
+            if os.path.exists(vf) and os.path.getsize(vf) > 250_000:
+                rendered = True
+        except Exception:
+            pass
+    return {"rendered": rendered, "finalized": finalized, "plan_path": plan_path}
+
+
+def _finalizar_tema_custom_renderizado(ruta: str) -> None:
+    try:
+        plan_path = os.path.join(ruta, "custom_plan.json")
+        if not os.path.exists(plan_path):
+            return
+        with open(plan_path, "r", encoding="utf-8") as f:
+            plan = json.load(f) or {}
+        brief = str(plan.get("brief") or "").strip()
+        topic_source = str(plan.get("topic_source") or "").strip().lower()
+        topic_file_path = str(plan.get("topic_file") or "").strip()
+
+        if brief:
+            topic_db.register_topic_if_new(
+                brief,
+                kind="custom",
+                plan_dir=ruta,
+                threshold=0.98,
+            )
+
+        try:
+            topic_db.delete_by_plan_dir(ruta, kind="custom_pending")
+        except Exception:
+            pass
+
+        if topic_source == "file" and topic_file_path and brief:
+            marcado = topic_file.mark_topic_used(brief, topic_file_path)
+            if marcado:
+                print("[MAIN] ✅ Tema marcado como usado en archivo.")
+
+        try:
+            import time as _time
+
+            plan["topic_finalized"] = True
+            plan["topic_finalized_at"] = _time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(plan_path, "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[MAIN] ⚠️ No se pudo finalizar tema (DB/archivo): {e}")
+
+
 def _marcar_plan_completado(path: str):
-    \
     if not path:
         return
     base = os.path.abspath(path)
@@ -260,7 +392,6 @@ def _marcar_plan_completado(path: str):
 
 
 def _generar_timeline(prompts: list[str], dur_est: float) -> list[dict]:
-    \
     prompts = [p for p in (prompts or []) if p]
     if not prompts:
         return []
@@ -278,12 +409,6 @@ def _generar_timeline(prompts: list[str], dur_est: float) -> list[dict]:
 
 
 def _segmentar_historia_en_prompts(historia: str, prompts: list[str]) -> list[str]:
-    \
-\
-\
-\
-\
-\
     texto = (historia or "").strip()
     prompts_limpios = [p for p in (prompts or []) if p]
     if not texto:
@@ -530,7 +655,9 @@ if __name__ == "__main__":
     try:
         topic_file.ensure_topics_file(topic_file.TOPICS_FILE_DEFAULT)
         disponibles = topic_file.load_topics_available_with_flags(topic_file.TOPICS_FILE_DEFAULT)
-        print(f"[MAIN] Temas disponibles (archivo): {len(disponibles)} -> {topic_file.TOPICS_FILE_DEFAULT}")
+        print(
+            f"[MAIN] Temas en archivo (sin prefijo 0): {len(disponibles)} -> {topic_file.TOPICS_FILE_DEFAULT}"
+        )
     except Exception as e:
         print(f"[MAIN] ⚠️ No se pudo leer temas_custom.txt: {e}")
 
@@ -544,7 +671,7 @@ if __name__ == "__main__":
     print(f"[MAIN] Ollama URL: {ollama_url} (env OLLAMA_URL)")
 
     accion = input(
-        "¿Qué deseas hacer? (1 = Videos, 2 = Textos, 3 = Imagen de prueba, 4 = Video personalizado, 5 = Renderizar personalizado, 6 = Importar temas): "
+        "¿Qué deseas hacer? (1 = Videos, 2 = Textos, 3 = Imagen de prueba, 4 = Video personalizado, 5 = Renderizar personalizado, 6 = Importar temas, 7 = Reanudar último personalizado, 8 = Reanudar TODOS personalizados pendientes): "
     ).strip()
 
     if accion == "6":
@@ -643,14 +770,51 @@ if __name__ == "__main__":
                 print(f"[MAIN] No hay temas disponibles en {temas_path} (sin prefijo '0').")
                 print("[MAIN] Agrega 1 tema por línea en el archivo y vuelve a intentar.")
                 raise SystemExit(0)
-            max_n = len(temas_disponibles)
+            print("[MAIN] Revisando temas repetidos contra la DB...")
+            elegibles: list[tuple[str, bool]] = []
+            repetidos = 0
+            for tema, forced in temas_disponibles:
+                brief = (tema or "").strip()
+                if not brief:
+                    continue
+                if forced:
+                    elegibles.append((brief, True))
+                    continue
+                try:
+                    match = topic_db.find_similar_topic(brief, kinds=("custom", "custom_pending"), threshold=0.90)
+                except Exception:
+                    match = None
+                if match is not None:
+                    repetidos += 1
+                    continue
+                elegibles.append((brief, False))
+
+            print(
+                f"[MAIN] Temas: {len(temas_disponibles)} | Elegibles (no repetidos): {len(elegibles)} | Repetidos: {repetidos}"
+            )
+            if not elegibles:
+                print("[MAIN] No hay temas elegibles (todos parecen repetidos).")
+                raise SystemExit(0)
+
+            max_n = len(elegibles)
             total_custom = _pedir_entero(f"¿Cuántos videos sacar del archivo? (max {max_n}): ", minimo=1, default=1)
             total_custom = min(total_custom, max_n)
+            temas_disponibles = elegibles
         else:
             total_custom = _pedir_entero("¿Cuántos videos personalizados quieres crear?: ", minimo=1, default=1)
 
         dur_opt = input("Duración mínima para TODOS (1=1 minuto, 2=5 minutos) [1]: ").strip()
         min_seconds = 60 if dur_opt != "2" else 300
+
+        sel_all = input("¿Quieres elegir manualmente las imágenes para TODOS los videos? (s/N): ").strip().lower()
+        seleccionar_imagenes_all = sel_all == "s"
+
+        auto_render_after_plans = _es_si(input("¿Al terminar los guiones/planes, renderizar automáticamente? (s/N): "))
+        unload_text_model_after_plans = False
+        if auto_render_after_plans:
+            unload_text_model_after_plans = _es_si(
+                input("¿Intentar descargar/unload el modelo de texto al terminar guiones? (s/N): ")
+            )
 
                                                                            
         briefs: list[str] = []
@@ -684,13 +848,9 @@ if __name__ == "__main__":
                 if not brief:
                     continue
                 if not forced and _tema_repetido(brief):
-                    print(f"[MAIN] Saltando tema del archivo por repetido: {brief[:120]}")
                     continue
 
-                sel_opt = input(
-                    f"¿Quieres elegir manualmente las imágenes para historia {len(briefs)+1}/{total_custom}? (s/N): "
-                ).strip().lower()
-                seleccionar_imagenes = sel_opt == "s"
+                seleccionar_imagenes = seleccionar_imagenes_all
 
                 briefs.append(brief)
                 seleccionar_flags.append(seleccionar_imagenes)
@@ -716,10 +876,7 @@ if __name__ == "__main__":
                         continue
                     break
 
-                sel_opt = input(
-                    f"¿Quieres elegir manualmente las imágenes para historia {i}/{total_custom}? (s/N): "
-                ).strip().lower()
-                seleccionar_imagenes = sel_opt == "s"
+                seleccionar_imagenes = seleccionar_imagenes_all
 
                 briefs.append(brief)
                 seleccionar_flags.append(seleccionar_imagenes)
@@ -742,6 +899,7 @@ if __name__ == "__main__":
             raise SystemExit(1)
 
         creados = 0
+        planes_creados: list[str] = []
         for i, (brief, seleccionar_imagenes, tema_file) in enumerate(
             zip(briefs, seleccionar_flags, brief_topic_files), start=1
         ):
@@ -774,6 +932,7 @@ if __name__ == "__main__":
                     except Exception as e:
                         print(f"[MAIN] ⚠️ No se pudo guardar metadata del tema: {e}")
                     creados += 1
+                    planes_creados.append(carpeta)
                     print(f"[MAIN] ✅ Plan creado {i}/{total_custom}: {carpeta}")
                 else:
                     print(f"[MAIN] ❌ No se pudo crear plan {i}/{total_custom}")
@@ -781,6 +940,37 @@ if __name__ == "__main__":
                 print(f"[MAIN] ⚠️ Error creando plan (historia {i}/{total_custom}): {e}")
 
         print(f"[MAIN] Planes creados: {creados}/{total_custom}")
+
+        if auto_render_after_plans and planes_creados:
+            if unload_text_model_after_plans:
+                try:
+                    ok = custom_video.intentar_descargar_modelo_texto()
+                    print("[MAIN] Unload modelo texto:", "OK" if ok else "No se pudo / no aplica")
+                except Exception as e:
+                    print(f"[MAIN] No se pudo intentar unload: {e}")
+
+            exitos = 0
+            try:
+                with _WindowsKeepAwake(enabled=True):
+                    for k, ruta in enumerate(planes_creados, start=1):
+                        try:
+                            ok = custom_video.renderizar_video_personalizado_desde_plan(
+                                ruta,
+                                voz=VOZ,
+                                velocidad=VELOCIDAD,
+                                interactive=False,
+                            )
+                            if ok:
+                                exitos += 1
+                            print(f"[MAIN] Render {k}/{len(planes_creados)}:", "OK" if ok else "FAIL")
+                        except Exception as e:
+                            print(f"[MAIN] Error renderizando (plan {k}): {e}")
+            except KeyboardInterrupt:
+                print("\n[MAIN] Interrumpido por el usuario.")
+                raise SystemExit(0)
+
+            print(f"[MAIN] Renders completados: {exitos}/{len(planes_creados)}")
+            raise SystemExit(0)
         descargar = input("¿Quieres intentar descargar el modelo de texto para liberar VRAM? (s/N): ").strip().lower()
         if descargar == "s":
             try:
@@ -818,52 +1008,34 @@ if __name__ == "__main__":
             seleccion = seleccion[:total_renders]
 
             exitos = 0
-            for k, idx in enumerate(seleccion, start=1):
-                ruta = planes[idx - 1]
-                try:
-                    ok = custom_video.renderizar_video_personalizado_desde_plan(
-                        ruta,
-                        voz=VOZ,
-                        velocidad=VELOCIDAD,
-                        interactive=(len(seleccion) <= 1),
-                    )
-                    if ok:
-                        exitos += 1
+            interactive_mode = len(seleccion) <= 1
 
-                                                                                              
-                                                                          
+            try:
+                with _WindowsKeepAwake(enabled=True):
+                    for k, idx in enumerate(seleccion, start=1):
+                        ruta = planes[idx - 1]
                         try:
-                            plan_path = os.path.join(ruta, "custom_plan.json")
-                            if os.path.exists(plan_path):
-                                with open(plan_path, "r", encoding="utf-8") as f:
-                                    plan = json.load(f) or {}
-                                brief = str(plan.get("brief") or "").strip()
-                                topic_source = str(plan.get("topic_source") or "").strip().lower()
-                                topic_file_path = str(plan.get("topic_file") or "").strip()
+                            ok = custom_video.renderizar_video_personalizado_desde_plan(
+                                ruta,
+                                voz=VOZ,
+                                velocidad=VELOCIDAD,
+                                interactive=interactive_mode,
+                            )
+                            if ok:
+                                exitos += 1
 
-                                                                                  
-                                if brief:
-                                    topic_db.register_topic_if_new(
-                                        brief,
-                                        kind="custom",
-                                        plan_dir=ruta,
-                                        threshold=0.98,
-                                    )
-                                                           
-                                try:
-                                    topic_db.delete_by_plan_dir(ruta, kind="custom_pending")
-                                except Exception:
-                                    pass
+                            if ok:
+                                _finalizar_tema_custom_renderizado(ruta)
 
-                                if topic_source == "file" and topic_file_path and brief:
-                                    marcado = topic_file.mark_topic_used(brief, topic_file_path)
-                                    if marcado:
-                                        print("[MAIN] ✅ Tema marcado como usado en archivo.")
+                            print(
+                                f"[MAIN] Render {k}/{len(seleccion)} (plan {idx}):",
+                                "✅ Exito" if ok else "❌ Falló",
+                            )
                         except Exception as e:
-                            print(f"[MAIN] ⚠️ No se pudo finalizar tema (DB/archivo): {e}")
-                    print(f"[MAIN] Render {k}/{len(seleccion)} (plan {idx}):", "✅ Exito" if ok else "❌ Falló")
-                except Exception as e:
-                    print(f"[MAIN] ⚠️ Error renderizando (plan {idx}): {e}")
+                            print(f"[MAIN] ⚠️ Error renderizando (plan {idx}): {e}")
+            except KeyboardInterrupt:
+                print("\n[MAIN] Interrumpido por el usuario.")
+                raise SystemExit(0)
 
             print(f"[MAIN] Renders completados: {exitos}/{len(seleccion)}")
             raise SystemExit(0)
@@ -886,12 +1058,84 @@ if __name__ == "__main__":
                     )
                     if ok:
                         exitos += 1
+                        _finalizar_tema_custom_renderizado(ruta)
                     print(f"[MAIN] Render {i}/{total_renders}:", "✅ Exito" if ok else "❌ Falló")
                 except Exception as e:
                     print(f"[MAIN] ⚠️ Error renderizando ({ruta}): {e}")
 
             print(f"[MAIN] Renders completados: {exitos}/{total_renders}")
             raise SystemExit(0)
+
+    if accion == "7":
+        planes = _custom_plans_pendientes()
+        if not planes:
+            print("[MAIN] No hay planes personalizados pendientes para reanudar.")
+            raise SystemExit(0)
+
+        ruta = planes[0]
+        print(f"[MAIN] Reanudando último plan personalizado pendiente: {ruta}")
+        try:
+            flags = _custom_plan_flags(ruta)
+            if flags.get("rendered"):
+                _finalizar_tema_custom_renderizado(ruta)
+                print("[MAIN] Reanudación: ✅ Ya estaba renderizado; solo se finalizó.")
+            else:
+                with _WindowsKeepAwake(enabled=True):
+                    ok = custom_video.renderizar_video_personalizado_desde_plan(
+                        ruta,
+                        voz=VOZ,
+                        velocidad=VELOCIDAD,
+                        interactive=False,
+                    )
+                if ok:
+                    _finalizar_tema_custom_renderizado(ruta)
+                print("[MAIN] Reanudación:", "✅ Exito" if ok else "❌ Falló")
+        except KeyboardInterrupt:
+            print("\n[MAIN] Interrumpido por el usuario.")
+            raise SystemExit(0)
+        except Exception as e:
+            print(f"[MAIN] ⚠️ Error reanudando último plan: {e}")
+            raise SystemExit(0)
+
+        raise SystemExit(0)
+
+    if accion == "8":
+        planes = _custom_plans_pendientes()
+        if not planes:
+            print("[MAIN] No hay planes personalizados pendientes.")
+            raise SystemExit(0)
+
+        print(f"[MAIN] Reanudando cola de personalizados pendientes: {len(planes)}")
+        exitos = 0
+        try:
+            with _WindowsKeepAwake(enabled=True):
+                for i, ruta in enumerate(planes, start=1):
+                    try:
+                        flags = _custom_plan_flags(ruta)
+                        if flags.get("rendered"):
+                            _finalizar_tema_custom_renderizado(ruta)
+                            exitos += 1
+                            print(f"[MAIN] {i}/{len(planes)}: ✅ Ya renderizado; finalizado: {ruta}")
+                            continue
+
+                        ok = custom_video.renderizar_video_personalizado_desde_plan(
+                            ruta,
+                            voz=VOZ,
+                            velocidad=VELOCIDAD,
+                            interactive=False,
+                        )
+                        if ok:
+                            _finalizar_tema_custom_renderizado(ruta)
+                            exitos += 1
+                        print(f"[MAIN] {i}/{len(planes)}:", "✅ Exito" if ok else "❌ Falló", f"| {ruta}")
+                    except Exception as e:
+                        print(f"[MAIN] ⚠️ Error en cola (item {i}/{len(planes)}): {e}")
+        except KeyboardInterrupt:
+            print("\n[MAIN] Interrumpido por el usuario.")
+            raise SystemExit(0)
+
+        print(f"[MAIN] Cola completada: {exitos}/{len(planes)}")
+        raise SystemExit(0)
 
                     
     fase = _pedir_entero("Selecciona fase (1=plan, 2=render pendientes): ", minimo=1, default=2)

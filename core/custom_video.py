@@ -5,6 +5,7 @@ import random
 import re
 import sys
 import subprocess
+import concurrent.futures
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote_plus
@@ -29,6 +30,8 @@ except Exception:
 _DEBUG_IMG_VALIDATION = (os.environ.get("DEBUG_IMG_VALIDATION") or "").strip() in {"1", "true", "True", "YES", "yes"}
 
 import requests
+
+from core.ollama_metrics import maybe_print_ollama_speed
 
                                                                                     
 if __name__ == "__main__" and __package__ is None:
@@ -98,6 +101,7 @@ CUSTOM_HOOK_MIN_IMG_SCORE = int(os.environ.get("CUSTOM_HOOK_MIN_IMG_SCORE", "3")
 
                                                      
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
+OPENVERSE_API = "https://api.openverse.engineering/v1/images"
                                                                                        
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -108,6 +112,15 @@ USER_AGENT = (
                                                                              
                                                                             
 DDG_IMAGES_BACKEND = (os.environ.get("DDG_IMAGES_BACKEND") or "lite").strip().lower() or "lite"
+
+IMG_SOURCES = (
+    os.environ.get("IMG_SOURCES")
+    or os.environ.get("CUSTOM_IMG_SOURCES")
+    or "ddg,openverse,wikimedia"
+).strip().lower()
+
+DDG_SEARCH_TIMEOUT_SEC = float(os.environ.get("DDG_SEARCH_TIMEOUT_SEC") or "25")
+OPENVERSE_TIMEOUT_SEC = float(os.environ.get("OPENVERSE_TIMEOUT_SEC") or "20")
 
                                                                                                  
                                                                                                
@@ -258,7 +271,6 @@ def _is_wikimedia_host(host: str) -> bool:
 
 
 def _maybe_warn_wikimedia_ua() -> None:
-    \
     global _WARNED_WIKIMEDIA_UA
     if _WARNED_WIKIMEDIA_UA:
         return
@@ -271,11 +283,6 @@ def _maybe_warn_wikimedia_ua() -> None:
 
 
 def _resolve_wikimedia_thumb_via_api(url: str) -> str | None:
-    \
-\
-\
-\
-\
     try:
         p = urlparse(url)
         host = (p.netloc or "").lower()
@@ -343,11 +350,6 @@ def generar_guion_personalizado_a_plan(
     min_seconds: int | None = None,
     seleccionar_imagenes: bool = False,
 ) -> str | None:
-    \
-\
-\
-\
-\
     carpeta = crear_carpeta_proyecto(prefix="custom")
     try:
         plan = generar_plan_personalizado(brief, min_seconds=min_seconds)
@@ -409,10 +411,6 @@ def generar_guion_personalizado_a_plan(
 
 
 def intentar_descargar_modelo_texto() -> bool:
-    \
-\
-\
-\
     try:
         ok_any = False
         for m in {OLLAMA_TEXT_MODEL_SHORT, OLLAMA_TEXT_MODEL_LONG}:
@@ -424,11 +422,6 @@ def intentar_descargar_modelo_texto() -> bool:
 
 
 def check_text_llm_ready() -> bool:
-    \
-\
-\
-\
-\
     try:
         _ = _ollama_generate("Reply only with: OK", temperature=0.0, max_tokens=8, model=OLLAMA_TEXT_MODEL_SHORT)
         return True
@@ -438,7 +431,6 @@ def check_text_llm_ready() -> bool:
 
 
 def _sanitize_brief_for_duration(brief: str) -> str:
-    \
     b = (brief or "").strip()
     if not b:
         return ""
@@ -451,7 +443,6 @@ def _sanitize_brief_for_duration(brief: str) -> str:
 
 
 def _extract_hook_from_brief(brief: str) -> str:
-    \
     b = (brief or "").strip()
     if not b:
         return ""
@@ -536,10 +527,6 @@ def _words(text: str) -> int:
 
 
 def _estimar_segundos(texto: str) -> float:
-    \
-\
-\
-\
     palabras = _words(texto or "")
     if palabras <= 0:
         return 0.0
@@ -690,13 +677,11 @@ def _prompt_rewrite_closing_segment(brief: str, contexto: str, last_segment: Dic
 
 
 def _infer_target_seconds_from_brief(brief: str) -> int:
-    \
     _ = brief
     return int(DEFAULT_CUSTOM_MIN_VIDEO_SEC)
 
 
 def _target_word_range(min_seconds: int) -> tuple[int, int]:
-\
                                                         
     sec = max(30, int(min_seconds))
     base = int(140 * (sec / 60.0))
@@ -747,7 +732,6 @@ def _generar_timeline(prompts: List[str], dur_est: float) -> List[Dict[str, Any]
 
 
 def _extract_json_value(raw: str) -> Any:
-    \
     raw = (raw or "").strip()
     if not raw:
         raise ValueError("Respuesta vacía del LLM")
@@ -876,6 +860,7 @@ def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int 
             if resp.status_code >= 400:
                 _raise_ollama_http_error(resp, model=model_name)
             data = resp.json()
+            maybe_print_ollama_speed(data, tag="CUSTOM")
             text = (data.get("response") or "").strip()
             return text
         except Exception as e:
@@ -903,7 +888,6 @@ def _ollama_generate_with_timeout(
     min_ctx: int = None,
     model: str | None = None,
 ) -> str:
-    \
     model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
     extra = _ollama_extra_options()
     options = {
@@ -932,6 +916,7 @@ def _ollama_generate_with_timeout(
     if resp.status_code >= 400:
         _raise_ollama_http_error(resp, model=model_name)
     data = resp.json()
+    maybe_print_ollama_speed(data, tag="CUSTOM")
     text = (data.get("response") or "").strip()
     if not text:
         raise RuntimeError("Ollama devolvió una respuesta vacía")
@@ -973,7 +958,6 @@ def _ollama_generate_json_with_timeout(
         )
     
     def _is_memory_error(err: Exception) -> bool:
-        \
         err_str = str(err).lower()
         return any(keyword in err_str for keyword in [
             "cublas", "cuda", "out of memory", "vram", 
@@ -1196,7 +1180,6 @@ def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
 
 
 def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
-\
                                                                    
                                                                                                
     referer = ""
@@ -1362,7 +1345,6 @@ def _ffmpeg_exe_for_images() -> str | None:
 
 
 def _convert_to_png_with_ffmpeg(path: str) -> str | None:
-    \
     ffmpeg = _ffmpeg_exe_for_images()
     if not ffmpeg:
         return None
@@ -1401,11 +1383,6 @@ def _convert_to_png_with_ffmpeg(path: str) -> str | None:
 
 
 def _normalizar_imagen_descargada(path: str, content_type: str = "") -> str:
-    \
-\
-\
-\
-\
     try:
         if not path or not os.path.exists(path):
             return path
@@ -1500,10 +1477,6 @@ def _es_imagen_valida(path: str) -> bool:
 
 
 def _crear_placeholder_imagen(carpeta: str, seg_tag: str) -> str | None:
-    \
-\
-\
-\
     os.makedirs(carpeta, exist_ok=True)
 
                                                    
@@ -1540,16 +1513,23 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
         return []
 
     try:
-        with DDGS() as ddgs:
-            kwargs = {
-                "max_results": max_results,
-                "safesearch": "off",
-            }
-            if _DDG_BACKEND == "ddgs":
-                                                                             
-                                                 
-                kwargs["backend"] = DDG_IMAGES_BACKEND
-            res = list(ddgs.images(query, **kwargs))
+        kwargs = {
+            "max_results": max_results,
+            "safesearch": "off",
+        }
+        if _DDG_BACKEND == "ddgs":
+            kwargs["backend"] = DDG_IMAGES_BACKEND
+
+        def _run() -> list[dict]:
+            with DDGS() as ddgs:
+                return list(ddgs.images(query, **kwargs))
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_run)
+            res = fut.result(timeout=max(5.0, float(DDG_SEARCH_TIMEOUT_SEC)))
+    except concurrent.futures.TimeoutError:
+        print(f"[IMG-DDG] Timeout buscando imágenes (>{DDG_SEARCH_TIMEOUT_SEC:.0f}s): {query[:120]}")
+        return []
     except Exception as e:
         print(f"[IMG-DDG] Falló búsqueda ({_DDG_BACKEND}): {e}")
         return []
@@ -1575,8 +1555,148 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
     return urls
 
 
+def _buscar_wikimedia_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "imageinfo",
+        "generator": "search",
+        "gsrsearch": _simplify_query(query),
+        "gsrlimit": max(1, min(50, int(max_results) * 3)),
+        "gsrnamespace": 6,
+        "gsrsort": "relevance",
+        "iiprop": "url|mime",
+        "iiurlwidth": 1600,
+    }
+    try:
+        resp = requests.get(WIKI_API, params=params, headers={"User-Agent": (_WIKIMEDIA_UA or USER_AGENT)}, timeout=20)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        pages = (data.get("query") or {}).get("pages") or {}
+    except Exception as e:
+        print(f"[IMG-WEB] Wikimedia fallo: {e}")
+        return []
+
+    out: list[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for page in pages.values():
+        if len(out) >= int(max_results):
+            break
+        if not isinstance(page, dict):
+            continue
+        info = page.get("imageinfo")
+        if not info:
+            continue
+        entry = info[0] if isinstance(info, list) and info else None
+        if not isinstance(entry, dict):
+            continue
+        mime = (entry.get("mime") or "").lower()
+        url = (entry.get("responsiveUrls") or {}).get("1600") or entry.get("url")
+        if not url:
+            continue
+        if mime and not mime.startswith("image/"):
+            continue
+        if any(str(url).lower().endswith(ext) for ext in (".pdf", ".svg", ".djvu")):
+            continue
+        if _is_blocked_image_host(str(url)):
+            continue
+        if str(url) in seen:
+            continue
+        seen.add(str(url))
+        title = str(page.get("title") or "Wikimedia Commons")
+        out.append((str(url), title))
+    return out
+
+
+def _buscar_openverse_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
+    q = _simplify_query(query)
+    if not q:
+        return []
+
+    params = {
+        "q": q,
+        "page_size": max(1, min(50, int(max_results) * 3)),
+        "mature": "false",
+    }
+    headers = {"User-Agent": USER_AGENT}
+
+    try:
+        resp = requests.get(OPENVERSE_API, params=params, headers=headers, timeout=max(5.0, float(OPENVERSE_TIMEOUT_SEC)))
+        if resp.status_code == 429:
+            return []
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        results = data.get("results") or []
+        if not isinstance(results, list):
+            return []
+    except Exception as e:
+        print(f"[IMG-OV] Openverse fallo: {e}")
+        return []
+
+    out: list[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for r in results:
+        if len(out) >= int(max_results):
+            break
+        if not isinstance(r, dict):
+            continue
+        title = str(r.get("title") or "Openverse")
+        url = (
+            r.get("thumbnail")
+            or r.get("url")
+            or r.get("image")
+            or r.get("thumbnail_url")
+        )
+        if not url:
+            continue
+        url = str(url)
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        if any(url.lower().endswith(ext) for ext in (".pdf", ".svg", ".djvu")):
+            continue
+        if _is_blocked_image_host(url):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append((url, title))
+    return out
+
+
+def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[str, str, str]]:
+    sources = [s.strip() for s in (IMG_SOURCES or "").split(",") if s.strip()]
+    if not sources:
+        sources = ["ddg", "openverse", "wikimedia"]
+
+    out: list[Tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    def _add(items: list[Tuple[str, str]], src: str) -> None:
+        nonlocal out
+        for u, t in items:
+            if len(out) >= int(max_results):
+                return
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            out.append((u, t, src))
+
+    for src in sources:
+        if len(out) >= int(max_results):
+            break
+        if src in {"ddg", "duckduckgo"}:
+            _add(_buscar_ddg_imagenes(query, max_results=max_results), "ddg")
+        elif src in {"wikimedia", "wiki"}:
+            _add(_buscar_wikimedia_imagenes(query, max_results=max_results), "wikimedia")
+        elif src in {"openverse", "ov"}:
+            _add(_buscar_openverse_imagenes(query, max_results=max_results), "openverse")
+        else:
+            continue
+
+    return out
+
+
 def _puntuar_con_moondream(path: str, query: str, *, note: str = "") -> int:
-    \
     global _VISION_AVAILABLE
     if _VISION_AVAILABLE is False:
         return 1
@@ -1605,10 +1725,6 @@ def descargar_mejores_imagenes_ddg(
     max_per_query: int = 8,
     segment_numbers: List[int] | None = None,
 ) -> tuple[List[str], List[Dict[str, Any]]]:
-    \
-\
-\
-\
     rutas: List[str] = []
     meta_all: List[Dict[str, Any]] = []
     notes = notes or [""] * len(queries)
@@ -1629,16 +1745,16 @@ def descargar_mejores_imagenes_ddg(
     if segment_numbers is not None and len(segment_numbers) != len(queries):
         raise ValueError("segment_numbers debe tener la misma longitud que queries")
 
-    def _uniq_candidates(cands: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    def _uniq_candidates(cands: List[Tuple[str, str, str]]) -> List[Tuple[str, str, str]]:
         seen_u = set()
-        out_u: List[Tuple[str, str]] = []
-        for u, t in cands:
+        out_u: List[Tuple[str, str, str]] = []
+        for u, t, src in cands:
             if not u:
                 continue
             if u in seen_u:
                 continue
             seen_u.add(u)
-            out_u.append((u, t))
+            out_u.append((u, t, src))
         return out_u
 
     used_urls: set[str] = set()
@@ -1654,16 +1770,16 @@ def descargar_mejores_imagenes_ddg(
         if is_hook:
             local_max = max(local_max, int(max_per_query) + max(0, int(CUSTOM_HOOK_EXTRA_CANDIDATES)))
 
-        candidatos = _buscar_ddg_imagenes(q, max_results=local_max)
+        candidatos = _buscar_imagenes_multi(q, max_results=local_max)
         if is_hook:
             variants = [
                 q,
                 f"{q} close up photo",
                 f"{q} dramatic lighting photo",
             ]
-            merged: List[Tuple[str, str]] = []
+            merged: List[Tuple[str, str, str]] = []
             for v in variants:
-                merged.extend(_buscar_ddg_imagenes(v, max_results=max(8, local_max // 2)))
+                merged.extend(_buscar_imagenes_multi(v, max_results=max(8, local_max // 2)))
             candidatos = _uniq_candidates(merged)[: max(local_max, len(candidatos))]
 
                                                                                    
@@ -1678,7 +1794,7 @@ def descargar_mejores_imagenes_ddg(
                 candidatos = candidatos[: int(local_max)]
                                                                      
         if candidatos:
-            candidatos = [(u, t) for (u, t) in candidatos if u not in used_urls]
+            candidatos = [(u, t, src) for (u, t, src) in candidatos if u not in used_urls]
 
         if not candidatos:
                                                                                   
@@ -1727,7 +1843,7 @@ def descargar_mejores_imagenes_ddg(
         best_title = ""
         best_k = None
 
-        for k, (url, title) in enumerate(candidatos, start=1):
+        for k, (url, title, src) in enumerate(candidatos, start=1):
                                                   
             parsed = url.split("?")[0].lower()
             ext = ".jpg"
@@ -1750,13 +1866,14 @@ def descargar_mejores_imagenes_ddg(
                     ).strip()
                 score = _puntuar_con_moondream(saved, q, note=score_note)
             except Exception as e:
-                print(f"[IMG-DDG] ❌ No se pudo puntuar candidato {k} de '{q}': {e}")
+                print(f"[IMG-WEB] ❌ No se pudo puntuar candidato {k} de '{q}': {e}")
                 score = 1
 
             cand_meta.append({
                 "candidate_index": k,
                 "url": url,
                 "title": title,
+                "source": src,
                 "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
                 "score": int(score),
             })
@@ -1794,11 +1911,11 @@ def descargar_mejores_imagenes_ddg(
                 f"{q} cinematic still photo",
             ]
             seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
-            merged2: List[Tuple[str, str]] = []
+            merged2: List[Tuple[str, str, str]] = []
             for v in variants2:
-                merged2.extend(_buscar_ddg_imagenes(v, max_results=max(10, extra_max // 2)))
-            nuevos2 = [(u, t) for (u, t) in _uniq_candidates(merged2) if u not in seen]
-            for k2, (url, title) in enumerate(nuevos2, start=len(cand_meta) + 1):
+                merged2.extend(_buscar_imagenes_multi(v, max_results=max(10, extra_max // 2)))
+            nuevos2 = [(u, t, src) for (u, t, src) in _uniq_candidates(merged2) if u not in seen]
+            for k2, (url, title, src) in enumerate(nuevos2, start=len(cand_meta) + 1):
                 parsed = url.split("?")[0].lower()
                 ext = ".jpg"
                 for suf in (".jpg", ".jpeg", ".png", ".webp"):
@@ -1818,12 +1935,13 @@ def descargar_mejores_imagenes_ddg(
                     ).strip()
                     score = _puntuar_con_moondream(saved, q, note=score_note)
                 except Exception as e:
-                    print(f"[IMG-DDG] ❌ No se pudo puntuar candidato {k2} de '{q}': {e}")
+                    print(f"[IMG-WEB] ❌ No se pudo puntuar candidato {k2} de '{q}': {e}")
                     score = 1
                 cand_meta.append({
                     "candidate_index": k2,
                     "url": url,
                     "title": title,
+                    "source": src,
                     "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
                     "score": int(score),
                 })
@@ -1839,11 +1957,11 @@ def descargar_mejores_imagenes_ddg(
                                                                                                         
         if (best_score < int(MIN_IMG_SCORE)) and (CUSTOM_IMG_QUALITY in {"high", "alta", "best", "max", "maxima", "máxima"}):
             extra = 32 if CUSTOM_IMG_QUALITY in {"best", "max", "maxima", "máxima"} else 20
-            candidatos2 = _buscar_ddg_imagenes(q, max_results=max(max_per_query, extra))
+            candidatos2 = _buscar_imagenes_multi(q, max_results=max(max_per_query, extra))
                                              
             seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
-            nuevos = [(u, t) for (u, t) in candidatos2 if u not in seen]
-            for k2, (url, title) in enumerate(nuevos, start=len(cand_meta) + 1):
+            nuevos = [(u, t, src) for (u, t, src) in candidatos2 if u not in seen]
+            for k2, (url, title, src) in enumerate(nuevos, start=len(cand_meta) + 1):
                 parsed = url.split("?")[0].lower()
                 ext = ".jpg"
                 for suf in (".jpg", ".jpeg", ".png", ".webp"):
@@ -1857,12 +1975,13 @@ def descargar_mejores_imagenes_ddg(
                 try:
                     score = _puntuar_con_moondream(saved, q, note=note)
                 except Exception as e:
-                    print(f"[IMG-DDG] ❌ No se pudo puntuar candidato {k2} de '{q}': {e}")
+                    print(f"[IMG-WEB] ❌ No se pudo puntuar candidato {k2} de '{q}': {e}")
                     score = 1
                 cand_meta.append({
                     "candidate_index": k2,
                     "url": url,
                     "title": title,
+                    "source": src,
                     "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
                     "score": int(score),
                 })
@@ -1917,11 +2036,6 @@ def _seleccionar_candidatos_interactivo(
     audios: List[str],
     duraciones: List[float],
 ) -> tuple[List[str], List[Dict[str, Any]]]:
-    \
-\
-\
-\
-\
     n = min(len(segmentos), len(imagenes), len(img_meta), len(audios), len(duraciones))
     if n <= 0:
         return imagenes, img_meta
@@ -2930,10 +3044,6 @@ def renderizar_video_personalizado_desde_plan(
     velocidad: str,
     interactive: bool = True,
 ) -> bool:
-    \
-\
-\
-\
     carpeta_plan = os.path.abspath(carpeta_plan)
     plan_file = carpeta_plan
     if os.path.isdir(plan_file):
@@ -3021,7 +3131,6 @@ def renderizar_video_personalizado_desde_plan(
     imagenes: List[str] = []
 
     def _intentar_reparar_seleccion(i_1: int, seg: Dict[str, Any]) -> str | None:
-        \
         seg_tag = f"seg_{i_1:02d}"
         for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             cand = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
@@ -3219,30 +3328,40 @@ def renderizar_video_personalizado_desde_plan(
         if borrados:
             print(f"[CUSTOM] INFO: Borrados {borrados} audios cacheados para regenerar TTS")
 
-    reuse_ok = not force_regen
-    for i in range(len(textos)):
-        p1 = os.path.join(carpeta_plan, f"audio_{i}.mp3")
-        p2 = os.path.join(carpeta_plan, f"audio_{i}.wav")
-        if os.path.exists(p1) and os.path.getsize(p1) > 0:
-            audios.append(p1)
-        elif os.path.exists(p2) and os.path.getsize(p2) > 0:
-            audios.append(p2)
-        else:
-            reuse_ok = False
-            break
-
-    if not reuse_ok:
-        if force_regen:
-            print("[CUSTOM] INFO: Regenerando TTS (CUSTOM_FORCE_REGEN_TTS=1)")
+    if force_regen:
+        print("[CUSTOM] INFO: Regenerando TTS (CUSTOM_FORCE_REGEN_TTS=1)")
         audios = tts.generar_audios(textos, carpeta_plan, voz=voz, velocidad=velocidad)
         if len(audios) != len(textos):
             print("[CUSTOM] ❌ No se pudieron generar todos los audios")
             return False
+    else:
+        total = len(textos)
+        faltan = 0
+        for i, texto in enumerate(textos):
+            p_mp3 = os.path.join(carpeta_plan, f"audio_{i}.mp3")
+            p_wav = os.path.join(carpeta_plan, f"audio_{i}.wav")
+            if os.path.exists(p_mp3) and os.path.getsize(p_mp3) > 0:
+                audios.append(p_mp3)
+                continue
+            if os.path.exists(p_wav) and os.path.getsize(p_wav) > 0:
+                audios.append(p_wav)
+                continue
+
+            faltan += 1
+            print(f"[CUSTOM] ▶️ Reanudando TTS: falta audio {i+1}/{total} (generando solo este)")
+            gen = tts.generar_audios([texto], carpeta_plan, voz=voz, velocidad=velocidad, start_index=i)
+            if not gen:
+                print(f"[CUSTOM] ❌ No se pudo generar audio {i+1}/{total}")
+                return False
+            audios.append(gen[0])
+
+        if faltan:
+            print(f"[CUSTOM] ✅ TTS reanudado: generados {faltan} audios faltantes")
 
     duraciones = [max(0.6, audio_duration_seconds(a)) for a in audios]
 
                                                                           
-    if bool(plan.get("seleccionar_imagenes")):
+    if bool(plan.get("seleccionar_imagenes")) and bool(interactive):
         try:
             img_meta: List[Dict[str, Any]] = []
             for seg in segmentos:
@@ -3331,10 +3450,25 @@ def renderizar_video_personalizado_desde_plan(
     audio_final = combine_audios_with_silence(audios, carpeta_plan, gap_seconds=0, min_seconds=None, max_seconds=None)
     video_final = render_video_ffmpeg(imagenes, audio_final, carpeta_plan, tiempo_img=None, durations=duraciones)
 
+    video_con_intro: str | None = None
     try:
-        append_intro_to_video(video_final, title_text=plan.get("youtube_title_es") or plan.get("title_es"))
+        video_con_intro = append_intro_to_video(video_final, title_text=plan.get("youtube_title_es") or plan.get("title_es"))
     except Exception as e:
         print(f"[CUSTOM] ⚠️ No se pudo agregar intro: {e}")
+
+    try:
+        import time as _time
+
+        plan["render_done"] = True
+        plan["render_done_at"] = _time.strftime("%Y-%m-%d %H:%M:%S")
+        plan["render_outputs"] = {
+            "video_final": os.path.relpath(video_final, carpeta_plan).replace("\\", "/") if video_final else None,
+            "video_con_intro": os.path.relpath(video_con_intro, carpeta_plan).replace("\\", "/") if video_con_intro else None,
+        }
+        with open(plan_file, "w", encoding="utf-8") as f:
+            json.dump(plan, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
     print("[CUSTOM] ✅ Video personalizado re-renderizado")
     return True

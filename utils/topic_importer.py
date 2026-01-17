@@ -25,7 +25,6 @@ def _clean_prompt_line(p: str) -> str:
 
 
 def _extract_prompts_anywhere(text: str) -> list[str]:
-    \
     raw = (text or "").strip()
     if not raw:
         return []
@@ -83,14 +82,6 @@ def _extract_prompts_anywhere(text: str) -> list[str]:
 
 
 def parse_prompts_from_blob(text: str) -> list[str]:
-\
-\
-\
-\
-\
-\
-\
-\
 
     return _extract_prompts_anywhere(text)
 
@@ -101,11 +92,6 @@ def dedupe_prompts(
     topics_path: str = topic_file.TOPICS_FILE_DEFAULT,
     db_threshold: float = 0.80,
 ) -> tuple[list[str], list[tuple[str, str]]]:
-\
-\
-\
-\
-\
 
     topic_file.ensure_topics_file(topics_path)
     existing_lines = topic_file.load_all_topics_raw(topics_path)

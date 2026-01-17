@@ -72,13 +72,6 @@ def _parece_voz_edge(voz: str | None) -> bool:
 
 
 def _velocidad_local_a_wpm(velocidad) -> int:
-    \
-\
-\
-\
-\
-\
-\
     if isinstance(velocidad, int):
         return max(50, min(400, velocidad))
 
@@ -237,12 +230,6 @@ def _edge_emotion_params(
     base_rate: str,
     intensity: float,
 ) -> tuple[str, str, str]:
-    \
-\
-\
-\
-\
-\
     base = _parse_pct(base_rate, default=-10.0)
 
                                                                        
@@ -271,12 +258,6 @@ def _edge_emotion_params(
 
 
 def _segment_intensity(total_segments: int, seg_index: int) -> float:
-    \
-\
-\
-\
-\
-\
     n = max(1, int(total_segments))
     i = int(seg_index)
     if i <= 0:
@@ -306,14 +287,6 @@ _SSML_TAG_RE = re.compile(r"<[^>]+>")
 
 
 def _strip_ssml(text: str) -> str:
-    \
-\
-\
-\
-\
-\
-\
-\
     s = (text or "")
     if not s:
         return ""
@@ -335,10 +308,6 @@ def _strip_ssml(text: str) -> str:
 
 
 def _strip_urls(text: str) -> str:
-    \
-\
-\
-\
     s = (text or "")
     if not s:
         return ""
@@ -368,10 +337,6 @@ def _xml_escape(s: str) -> str:
 
 
 def _build_edge_ssml(*, text: str, voice: str, style: str, style_degree: str | None = None) -> str:
-    \
-\
-\
-\
     v = (voice or "").strip()
     st = (style or "").strip()
     deg = (style_degree or "").strip()
@@ -421,7 +386,6 @@ def _concat_wavs(input_wavs: list[str], output_wav: str) -> None:
 
 
 def _render_wav_subprocess(*, texto: str, ruta_wav: str, voz_id: str | None, rate_wpm: int, timeout_s: int) -> bool:
-    \
     worker = os.path.join(os.path.dirname(__file__), "tts_worker.py")
     if not os.path.exists(worker):
         raise FileNotFoundError(worker)
@@ -462,10 +426,6 @@ def _render_wav_subprocess(*, texto: str, ruta_wav: str, voz_id: str | None, rat
 
 
 def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None):
-    \
-\
-\
-\
     voces = engine.getProperty("voices") or []
     if not voces:
         return None, None
@@ -520,7 +480,7 @@ def _seleccionar_voz_pyttsx3(engine, voz_solicitada: str | None):
     return None, None
 
 
-async def _generar_audios_edge(textos, carpeta, voz, velocidad):
+async def _generar_audios_edge(textos, carpeta, voz, velocidad, start_index: int = 0):
     archivos_audio = []
                  
                                                                                                        
@@ -532,9 +492,15 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad):
         print("[TTS-EDGE] WARNING: Estilos SSML desactivados (edge-tts escapa el input y se narran los tags).")
     print(f"[TTS-EDGE] Generando {len(textos)} audios con {voz} (rate {velocidad})...")
 
+    try:
+        start_index = int(start_index or 0)
+    except Exception:
+        start_index = 0
+
     total_textos = len(textos)
     for i, texto in enumerate(textos):
-        nombre_archivo = f"audio_{i}.mp3"
+        out_i = start_index + i
+        nombre_archivo = f"audio_{out_i}.mp3"
         ruta_completa = os.path.join(carpeta, nombre_archivo)
 
         texto_in = (textos[i] or "").strip().replace("\u200b", " ")
@@ -578,7 +544,7 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad):
                 await asyncio.sleep(random.uniform(2.0, 4.0))
 
                 for j, ch in enumerate(chunks):
-                    part = os.path.join(carpeta, f"audio_{i}_part{j}.mp3")
+                    part = os.path.join(carpeta, f"audio_{out_i}_part{j}.mp3")
                     rate_j, pitch_j, vol_j = _edge_emotion_params(
                         chunk_index=j,
                         chunk_count=len(chunks),
@@ -636,12 +602,7 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad):
     return archivos_audio
 
 
-def generar_audios(textos, carpeta, voz=None, velocidad=None):
-\
-\
-\
-\
-\
+def generar_audios(textos, carpeta, voz=None, velocidad=None, start_index: int = 0):
                         
     if _parece_voz_edge(voz):
         if edge_tts is None:
@@ -650,7 +611,7 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
         voz_edge = voz
         vel_edge = velocidad if isinstance(velocidad, str) and "%" in velocidad else VELOCIDAD_EDGE
         try:
-            return asyncio.run(_generar_audios_edge(textos, carpeta, voz_edge, vel_edge))
+            return asyncio.run(_generar_audios_edge(textos, carpeta, voz_edge, vel_edge, start_index=start_index))
         except Exception as e:
             print(f"Error crítico en TTS-EDGE: {e}")
             return []
@@ -665,12 +626,18 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
         print(f"[TTS-LOCAL] Voz solicitada: {voz_solicitada}")
         print(f"[TTS-LOCAL] Velocidad (WPM): {vel_local}")
 
+        try:
+            start_index = int(start_index or 0)
+        except Exception:
+            start_index = 0
+
         total = len(textos)
         for idx, texto in enumerate(textos):
             texto = (textos[idx] or "").strip().replace("\u200b", " ")
             texto = _strip_ssml(texto)
             texto = _strip_urls(texto)
-            ruta = os.path.join(carpeta, f"audio_{idx}.wav")
+            out_i = start_index + idx
+            ruta = os.path.join(carpeta, f"audio_{out_i}.wav")
             print(f"   - Renderizando audio {idx+1}/{total} (chars={len(texto)})")
 
             timeout_s = int(max(45, min(240, 20 + (len(texto) / 18))))
@@ -694,7 +661,7 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None):
             print(f"[TTS-LOCAL] Reintentando con split en {len(chunks)} partes...")
             temp_paths: list[str] = []
             for j, ch in enumerate(chunks):
-                tmp = os.path.join(carpeta, f"audio_{idx}_part{j}.wav")
+                tmp = os.path.join(carpeta, f"audio_{out_i}_part{j}.wav")
                 temp_paths.append(tmp)
                 ok_part = _render_wav_subprocess(
                     texto=ch,

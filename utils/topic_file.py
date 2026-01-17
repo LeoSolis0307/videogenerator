@@ -43,10 +43,6 @@ def load_topics_available(path: str = TOPICS_FILE_DEFAULT) -> list[str]:
 
 
 def load_topics_available_with_flags(path: str = TOPICS_FILE_DEFAULT) -> list[tuple[str, bool]]:
-    \
-\
-\
-\
     ensure_topics_file(path)
     out: list[tuple[str, bool]] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -65,7 +61,6 @@ def load_topics_available_with_flags(path: str = TOPICS_FILE_DEFAULT) -> list[tu
 
 
 def load_all_topics_raw(path: str = TOPICS_FILE_DEFAULT) -> list[str]:
-    \
     ensure_topics_file(path)
     out: list[str] = []
     with open(path, "r", encoding="utf-8") as f:
@@ -78,10 +73,6 @@ def load_all_topics_raw(path: str = TOPICS_FILE_DEFAULT) -> list[str]:
 
 
 def mark_topic_used(topic: str, path: str = TOPICS_FILE_DEFAULT) -> bool:
-\
-\
-\
-\
 
     ensure_topics_file(path)
     want = topic_db.normalize_text(topic)
@@ -119,10 +110,6 @@ def append_topics(
     *,
     path: str = TOPICS_FILE_DEFAULT,
 ) -> None:
-    \
-\
-\
-\
     ensure_topics_file(path)
     with open(path, "a", encoding="utf-8") as f:
         for t, forced in topics:

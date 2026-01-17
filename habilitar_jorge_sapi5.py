@@ -12,7 +12,6 @@ SAPI5_BASE = r"SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens"
 
 
 def _copy_tree(src_root, src_path, dst_root, dst_path):
-\
                    
     winreg.CreateKey(dst_root, dst_path)
 

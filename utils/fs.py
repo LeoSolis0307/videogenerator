@@ -12,11 +12,6 @@ HISTORIAL_FILE = "storage/historial.txt"
           
                            
 def crear_carpeta_proyecto(prefix=None) -> str:
-    \
-\
-\
-\
-\
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     nombre = f"{prefix}_{timestamp}" if prefix else timestamp
     carpeta = os.path.join(BASE_OUTPUT_DIR, nombre)
@@ -25,9 +20,6 @@ def crear_carpeta_proyecto(prefix=None) -> str:
 
 
 def asegurar_directorio(path: str):
-    \
-\
-\
     os.makedirs(path, exist_ok=True)
 
 
@@ -35,9 +27,6 @@ def asegurar_directorio(path: str):
            
                            
 def cargar_historial() -> set:
-    \
-\
-\
     asegurar_directorio(os.path.dirname(HISTORIAL_FILE))
     if not os.path.exists(HISTORIAL_FILE):
         open(HISTORIAL_FILE, "w", encoding="utf-8").close()
@@ -48,9 +37,6 @@ def cargar_historial() -> set:
 
 
 def guardar_historial(ids):
-    \
-\
-\
     if not ids:
         return
     asegurar_directorio(os.path.dirname(HISTORIAL_FILE))
