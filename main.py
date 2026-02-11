@@ -7,6 +7,7 @@ import shutil
 import time
 
 from core import custom_video, image_downloader, reddit_scraper, story_generator, text_processor, tts
+from utils.fs import crear_carpeta_proyecto
 from core import topic_db
 from core.video_renderer import (
     append_intro_to_video,
@@ -22,18 +23,11 @@ from utils import topic_file
 from utils import topic_importer
 
 
-                                                   
-                                                                                               
-VOZ = "es-MX-JorgeNeural"
-                                                
-VELOCIDAD = "-10%"                                                
+from core.config import settings
 
-                                                                       
-                                                                                                
-                                                    
-VIDEO_QUALITY = (os.environ.get("VIDEO_QUALITY") or "high").strip()
-if VIDEO_QUALITY:
-    os.environ["VIDEO_QUALITY"] = VIDEO_QUALITY
+# Constantes locales (podrían moverse a config si se desea)
+VOZ = "es-MX-JorgeNeural"
+VELOCIDAD = "-10%"
 
 HISTORIAS_BASE = "historias"
 HISTORIAS_GENEROS = {

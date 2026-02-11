@@ -8,6 +8,7 @@ import wave
 import shutil
 
 import imageio_ffmpeg
+from core.config import settings
 
 DEFAULT_INTRO_PATH = r"C:\Users\Leonardo\Downloads\video\intro.mp4"
 MIN_VIDEO_SEC = 15 * 60
@@ -18,48 +19,36 @@ SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
                                               
                                                                                
                                                      
-FIT_MODE = (os.environ.get("VIDEO_FIT_MODE") or "pad").strip().lower()
-PAD_STYLE = (os.environ.get("VIDEO_PAD_STYLE") or "blur").strip().lower()              
-ENABLE_KENBURNS = (os.environ.get("VIDEO_KENBURNS") or "0").strip() in {"1", "true", "yes"}
-KB_RATE = float(os.environ.get("VIDEO_KB_RATE") or 0.0009)
-KB_MAX = float(os.environ.get("VIDEO_KB_MAX") or 1.08)
-XF_MS = int(os.environ.get("VIDEO_CROSSFADE_MS") or 250)                     
-ENABLE_LOUDNORM = (os.environ.get("ENABLE_LOUDNORM") or "1").strip() in {"1", "true", "yes"}
-VIDEO_BLUR = (os.environ.get("VIDEO_BLUR") or "10:1").strip()                        
+                        
 
 
 def _encoding_cfg() -> dict:
-    quality = (os.environ.get("VIDEO_QUALITY") or "").strip().lower()
+    quality = (settings.video_quality or "").strip().lower()
 
-                                      
-    preset = (os.environ.get("VIDEO_PRESET") or "veryfast").strip()
-    crf = (os.environ.get("VIDEO_CRF") or "20").strip()
-    fps = (os.environ.get("VIDEO_FPS") or "25").strip()
-    audio_bitrate = (os.environ.get("AUDIO_BITRATE") or "").strip()
-    scale_flags = (os.environ.get("VIDEO_SCALE_FLAGS") or "").strip()
-    tune = (os.environ.get("VIDEO_TUNE") or "").strip()
+    preset = settings.video_preset
+    crf = settings.video_crf
+    fps = settings.video_fps
+    audio_bitrate = settings.audio_bitrate
+    scale_flags = settings.video_scale_flags
+    tune = settings.video_tune
 
     if quality in {"high", "alta"}:
-        preset = os.environ.get("VIDEO_PRESET") or "slow"
-        crf = os.environ.get("VIDEO_CRF") or "18"
-        audio_bitrate = os.environ.get("AUDIO_BITRATE") or "192k"
-        scale_flags = os.environ.get("VIDEO_SCALE_FLAGS") or "lanczos"
-        tune = os.environ.get("VIDEO_TUNE") or "stillimage"
+        preset = preset or "slow"
+        crf = crf or "18"
+        audio_bitrate = audio_bitrate or "192k"
+        scale_flags = scale_flags or "lanczos"
+        tune = tune or "stillimage"
     elif quality in {"best", "max", "maxima", "máxima"}:
-        preset = os.environ.get("VIDEO_PRESET") or "veryslow"
-        crf = os.environ.get("VIDEO_CRF") or "17"
-        audio_bitrate = os.environ.get("AUDIO_BITRATE") or "256k"
-        scale_flags = os.environ.get("VIDEO_SCALE_FLAGS") or "lanczos"
-        tune = os.environ.get("VIDEO_TUNE") or "stillimage"
-
-                             
-    try:
-        int(crf)
-    except Exception:
+        preset = preset or "veryslow"
+        crf = crf or "17"
+        audio_bitrate = audio_bitrate or "256k"
+        scale_flags = scale_flags or "lanczos"
+        tune = tune or "stillimage"
+                     
+    # Fallbacks
+    if not crf or not crf.isdigit():
         crf = "20"
-    try:
-        int(float(fps))
-    except Exception:
+    if not fps:
         fps = "25"
 
     return {
@@ -76,16 +65,17 @@ def _encoding_cfg() -> dict:
 def _scale_filter(size: int) -> str:
     cfg = _encoding_cfg()
     flags = cfg.get("scale_flags") or ""
-                                                                                  
-    mode = "decrease" if FIT_MODE != "crop" else "increase"
+    
+    fit = settings.video_fit_mode.lower()
+    mode = "decrease" if fit != "crop" else "increase"
     if flags:
         return f"scale={size}:{size}:force_original_aspect_ratio={mode}:flags={flags}"
     return f"scale={size}:{size}:force_original_aspect_ratio={mode}"
 
 
 def _post_scale_fit(size: int) -> str:
-                                                                     
-    if FIT_MODE == "crop":
+    fit = settings.video_fit_mode.lower()
+    if fit == "crop":
         return f"crop={size}:{size}:(iw-{size})/2:(ih-{size})/2"
                                
     return f"pad={size}:{size}:(%d-iw)/2:(%d-ih)/2" % (size, size)
@@ -104,19 +94,26 @@ def _build_per_stream_filters(idx: int, fps: str, dur_val: float, size: int = 76
     pad_sec = max(0.0, float(dur_val) - float(stop_frame))
     pad_sec_s = f"{pad_sec:.6f}"
     dur_s = f"{float(dur_val):.6f}"
-    if FIT_MODE == "pad" and PAD_STYLE == "blur":
-                                                                           
+    
+    fit_mode = settings.video_fit_mode.lower()
+    pad_style = settings.video_pad_style.lower()
+    blur_style = settings.video_blur
+    kenburns = settings.video_kenburns
+    kb_rate = settings.video_kb_rate
+    kb_max = settings.video_kb_max
+
+    if fit_mode == "pad" and pad_style == "blur":
         parts.append(f"[{idx}:v]split=2[s{idx}a][s{idx}b]")
                                        
         parts.append(
             f"[s{idx}a]fps={fps_val},scale={size}:{size}:force_original_aspect_ratio=increase,"
-            f"crop={size}:{size},format=yuv420p,boxblur={VIDEO_BLUR},setsar=1[bg{idx}]"
+            f"crop={size}:{size},format=yuv420p,boxblur={blur_style},setsar=1[bg{idx}]"
         )
                                            
-        if ENABLE_KENBURNS:
+        if kenburns:
             frames = max(1, int(round(float(fps) * float(dur_val))))
             parts.append(
-                f"[s{idx}b]fps={fps_val},zoompan=z='min(zoom+{KB_RATE},{KB_MAX})':d={frames}:s={size}x{size},format=yuv420p,setsar=1[fg{idx}]"
+                f"[s{idx}b]fps={fps_val},zoompan=z='min(zoom+{kb_rate},{kb_max})':d={frames}:s={size}x{size},format=yuv420p,setsar=1[fg{idx}]"
             )
         else:
             parts.append(
@@ -129,17 +126,15 @@ def _build_per_stream_filters(idx: int, fps: str, dur_val: float, size: int = 76
         )
         return parts
 
-                                                            
-    if ENABLE_KENBURNS:
+    if kenburns:
         frames = max(1, int(round(float(fps) * float(dur_val))))
         parts.append(
-            f"[{idx}:v]fps={fps_val},zoompan=z='min(zoom+{KB_RATE},{KB_MAX})':d={frames}:s={size}x{size},"
+            f"[{idx}:v]fps={fps_val},zoompan=z='min(zoom+{kb_rate},{kb_max})':d={frames}:s={size}x{size},"
             f"format=yuv420p,setsar=1,tpad=stop_mode=clone:stop_duration={pad_sec_s},trim=duration={dur_s},"
             f"settb=AVTB,setpts=PTS-STARTPTS,fps={fps_val}[{vlabel}]"
         )
         return parts
 
-                                                    
     parts.append(
         f"[{idx}:v]fps={fps_val},{_scale_filter(size)},{_post_scale_fit(size)},setsar=1,format=yuv420p,"
         f"tpad=stop_mode=clone:stop_duration={pad_sec_s},trim=duration={dur_s},"

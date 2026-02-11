@@ -16,115 +16,40 @@ import base64
 from urllib.parse import urlparse
 
                                                                                 
-try:                 
+from core.config import settings
+from core.llm.client import llm_client
+from core.models import VideoPlan, ScriptSegment, TimelineItem
+from utils.fs import crear_carpeta_proyecto
+from core import tts, image_downloader, text_processor, reddit_scraper, story_generator
+
+try:
     from ddgs import DDGS as DDGS
-    _DDG_BACKEND = "ddgs"
 except Exception:
-    try:                  
+    try:
         from duckduckgo_search import DDGS as DDGS
-        _DDG_BACKEND = "duckduckgo_search"
     except Exception:
         DDGS = None
-        _DDG_BACKEND = None
 
-_DEBUG_IMG_VALIDATION = (os.environ.get("DEBUG_IMG_VALIDATION") or "").strip() in {"1", "true", "True", "YES", "yes"}
-
-import requests
-
-from core.ollama_metrics import maybe_print_ollama_speed
-
-                                                                                    
-if __name__ == "__main__" and __package__ is None:
-    sys.path.append(str(Path(__file__).resolve().parent.parent))
-
-from core import tts_engine as tts
-from core import vision_llava_phi3
-from core import ollama_vram
-from core.video_renderer import (
-    append_intro_to_video,
-    audio_duration_seconds,
-    combine_audios_with_silence,
-    render_video_ffmpeg,
-)
-from utils.fs import crear_carpeta_proyecto
-
-                                                                                       
-_VISION_AVAILABLE: bool | None = None
-                              
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip()
-                           
-                                                                                                
-                                                              
-                                                                                  
-OLLAMA_TEXT_MODEL_SHORT = (os.environ.get("OLLAMA_TEXT_MODEL_SHORT") or "gemma2:9b").strip() or "gemma2:9b"
-OLLAMA_TEXT_MODEL_LONG = (os.environ.get("OLLAMA_TEXT_MODEL_LONG") or "qwen2.5:7b").strip() or "qwen2.5:7b"
-
+# Configuración migrada a core/config.py (settings)
 
 def _text_model_for_seconds(target_seconds: int | None) -> str:
+    if settings.ollama_text_model:
+        return settings.ollama_text_model
     try:
         sec = int(target_seconds or 0)
     except Exception:
         sec = 0
-    return OLLAMA_TEXT_MODEL_LONG if sec >= 300 else OLLAMA_TEXT_MODEL_SHORT
-OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
-                                                              
-                                                                          
-OLLAMA_OPTIONS_JSON = (os.environ.get("OLLAMA_OPTIONS_JSON") or "").strip()
-                                                                                     
-                                                                
-OLLAMA_TEXT_NUM_CTX_DEFAULT = int(
-    (os.environ.get("OLLAMA_TEXT_NUM_CTX") or os.environ.get("OLLAMA_NUM_CTX") or "2048").strip() or "2048"
-)
-                                                                  
-                                                                      
-VISION_TIMEOUT_SEC = int(os.environ.get("VISION_TIMEOUT_SEC", os.environ.get("MOONDREAM_TIMEOUT_SEC", "90")) or "90")
-VISION_RETRIES = int(os.environ.get("VISION_RETRIES", os.environ.get("MOONDREAM_RETRIES", "3")) or "3")
-VISION_MODEL = (os.environ.get("VISION_MODEL") or "minicpm-v:latest").strip() or "minicpm-v:latest"
+    return settings.ollama_text_model_long if sec >= 300 else settings.ollama_text_model_short
 
-                                                                 
-DEFAULT_CUSTOM_MIN_VIDEO_SEC = int(os.environ.get("CUSTOM_MIN_VIDEO_SEC", "60") or "60")
-
-                                                                                         
-MIN_IMG_SCORE = int(os.environ.get("CUSTOM_MIN_IMG_SCORE", "1") or "1")
-
-                                                                                           
-CUSTOM_IMG_MAX_PER_QUERY = int(os.environ.get("CUSTOM_IMG_MAX_PER_QUERY", "8") or "8")
-
-                                                   
-CUSTOM_IMG_QUALITY = (os.environ.get("CUSTOM_IMG_QUALITY") or "").strip().lower()
-
-                                                                                
-                                                                  
-CUSTOM_HOOK_SEGMENTS = int(os.environ.get("CUSTOM_HOOK_SEGMENTS", "2") or "2")
-CUSTOM_HOOK_EXTRA_CANDIDATES = int(os.environ.get("CUSTOM_HOOK_EXTRA_CANDIDATES", "10") or "10")
-CUSTOM_HOOK_MIN_IMG_SCORE = int(os.environ.get("CUSTOM_HOOK_MIN_IMG_SCORE", "3") or "3")
-
-                                                     
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
 OPENVERSE_API = "https://api.openverse.engineering/v1/images"
-                                                                                       
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/121.0.0.0 Safari/537.36"
 )
 
-                                                                             
-                                                                            
-DDG_IMAGES_BACKEND = (os.environ.get("DDG_IMAGES_BACKEND") or "lite").strip().lower() or "lite"
 
-IMG_SOURCES = (
-    os.environ.get("IMG_SOURCES")
-    or os.environ.get("CUSTOM_IMG_SOURCES")
-    or "ddg,openverse,wikimedia"
-).strip().lower()
-
-DDG_SEARCH_TIMEOUT_SEC = float(os.environ.get("DDG_SEARCH_TIMEOUT_SEC") or "25")
-OPENVERSE_TIMEOUT_SEC = float(os.environ.get("OPENVERSE_TIMEOUT_SEC") or "20")
-
-                                                                                                 
-                                                                                               
-ENABLE_TEXT_RANK = (os.environ.get("CUSTOM_IMG_TEXT_RANK") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}
 
 _STOPWORDS_ES = {
     "el", "la", "los", "las", "un", "una", "unos", "unas", "y", "o", "u", "de", "del", "al", "a",
@@ -229,23 +154,7 @@ def _candidate_text_relevance(url: str, title: str, *, keywords: list[str]) -> f
 
                                                                       
                                                                                                                     
-_DEFAULT_BLOCKED_HOSTS = {
-    "freepik.com",
-    "img.freepik.com",
-    "pinterest.com",
-    "i.pinimg.com",
-                                                                        
-    "researchgate.net",
-    "rgstatic.net",
-}
-IMG_BLOCKED_HOSTS = {
-    h.strip().lower()
-    for h in re.split(r"[\s,;]+", (os.environ.get("IMG_BLOCKED_HOSTS") or "").strip())
-    if h.strip()
-} or set(_DEFAULT_BLOCKED_HOSTS)
-
-                                                                                       
-ALLOW_AVIF = (os.environ.get("ALLOW_AVIF") or "").strip().lower() in {"1", "true", "yes", "si", "sí"}
+IMG_BLOCKED_HOSTS = settings.blocked_hosts_set
 
 
 def _is_blocked_image_host(url: str) -> bool:
@@ -261,7 +170,7 @@ def _is_blocked_image_host(url: str) -> bool:
         return False
 
 
-_WIKIMEDIA_UA = (os.environ.get("WIKIMEDIA_USER_AGENT") or os.environ.get("IMG_WIKIMEDIA_UA") or "").strip()
+_WIKIMEDIA_UA = settings.wikimedia_user_agent
 _WARNED_WIKIMEDIA_UA = False
 
 
@@ -358,17 +267,22 @@ def generar_guion_personalizado_a_plan(
         return None
 
                                                                        
-    plan.setdefault("youtube_title_es", plan.get("title_es") or "Video personalizado")
+    if not plan.youtube_title_es:
+        plan.youtube_title_es = plan.title_es or "Video personalizado"
 
                                                                                  
                                                                               
     try:
-        if int(plan.get("target_seconds") or (min_seconds or DEFAULT_CUSTOM_MIN_VIDEO_SEC)) == 60:
-            base_title = str(plan.get("youtube_title_es") or "").strip()
-            script_es = str(plan.get("script_es") or "").strip()
-            plan["youtube_title_es"] = _append_shorts_hashtags_to_title(
+        ts_val = plan.target_seconds
+        if not ts_val:
+            ts_val = min_seconds or settings.custom_min_video_sec
+
+        if int(ts_val) == 60:
+            base_title = str(plan.youtube_title_es or "").strip()
+            script_es = str(plan.script_es or "").strip()
+            plan.youtube_title_es = _append_shorts_hashtags_to_title(
                 base_title,
-                brief=str(plan.get("brief") or brief or "").strip(),
+                brief=str(plan.brief or brief or "").strip(),
                 script_es=script_es,
             )
     except Exception:
@@ -378,15 +292,15 @@ def generar_guion_personalizado_a_plan(
     try:
         yt_title_txt = os.path.join(carpeta, "youtube_title.txt")
         with open(yt_title_txt, "w", encoding="utf-8") as f:
-            f.write(str(plan.get("youtube_title_es") or "").strip() + "\n")
+            f.write(str(plan.youtube_title_es or "").strip() + "\n")
     except Exception:
         pass
-    plan["seleccionar_imagenes"] = bool(seleccionar_imagenes)
+    plan.seleccionar_imagenes = bool(seleccionar_imagenes)
 
     plan_path = os.path.join(carpeta, "custom_plan.json")
     try:
         with open(plan_path, "w", encoding="utf-8") as f:
-            json.dump(plan, f, ensure_ascii=False, indent=2)
+            json.dump(plan.model_dump() if hasattr(plan, "model_dump") else plan.dict(), f, ensure_ascii=False, indent=2)
         print(f"[CUSTOM] ✅ Plan (solo guion) guardado en {plan_path}")
     except Exception as e:
         print(f"[CUSTOM] ⚠️ No se pudo guardar el plan: {e}")
@@ -395,10 +309,10 @@ def generar_guion_personalizado_a_plan(
                                                                       
                                                                   
     try:
-        if (os.environ.get("UNLOAD_TEXT_MODEL") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}:
+        if (os.environ.get("settings.ollama_text_num_ctx") or "1").strip().lower() in {"1", "true", "yes", "si", "sí"}:
                                                                                  
             ok_any = False
-            for m in {OLLAMA_TEXT_MODEL_SHORT, OLLAMA_TEXT_MODEL_LONG}:
+            for m in {settings.ollama_text_model_short, settings.ollama_text_model_long}:
                 if m and ollama_vram.try_unload_model(m):
                     ok_any = True
                     print(f"[CUSTOM] ℹ️ Modelo de texto descargado: {m}")
@@ -413,7 +327,7 @@ def generar_guion_personalizado_a_plan(
 def intentar_descargar_modelo_texto() -> bool:
     try:
         ok_any = False
-        for m in {OLLAMA_TEXT_MODEL_SHORT, OLLAMA_TEXT_MODEL_LONG}:
+        for m in {settings.ollama_text_model_short, settings.ollama_text_model_long}:
             if m and ollama_vram.try_unload_model(m):
                 ok_any = True
         return ok_any
@@ -421,9 +335,109 @@ def intentar_descargar_modelo_texto() -> bool:
         return False
 
 
+def _export_long_videos_to_videos_dir(
+    *,
+    plan: Dict[str, Any],
+    carpeta_plan: str,
+    video_final: str | None,
+    video_con_intro: str | None,
+) -> tuple[str | None, Dict[str, Any]]:
+    """Mueve los MP4 de videos largos a la carpeta raíz `videos/`.
+
+    - Mantiene `output/...` para planes/activos.
+    - Para planes largos, el entregable queda en `videos/<nombre_carpeta_plan>/`.
+    - Devuelve (export_video_path, export_info_dict).
+    """
+
+    try:
+        target_seconds = int(plan.get("target_seconds") or 0)
+    except Exception:
+        target_seconds = 0
+
+    try:
+        min_long = int((os.environ.get("LONG_VIDEO_MIN_SECONDS_FOR_VIDEOS_DIR") or "300").strip() or "300")
+    except Exception:
+        min_long = 300
+
+    if target_seconds < min_long:
+        return (video_con_intro or video_final), {}
+
+    root_dir = (os.environ.get("LONG_VIDEOS_DIR") or "videos").strip() or "videos"
+    videos_root = os.path.abspath(root_dir)
+    dest_dir = os.path.join(videos_root, os.path.basename(os.path.abspath(carpeta_plan)))
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception:
+        return (video_con_intro or video_final), {}
+
+    def _rel_from_cwd(p: str) -> str:
+        try:
+            return os.path.relpath(p, os.path.abspath(".")).replace("\\", "/")
+        except Exception:
+            return p
+
+    def _move(src: str | None) -> str | None:
+        if not src:
+            return None
+        src_abs = os.path.abspath(src)
+        if not os.path.exists(src_abs):
+            return None
+        dst_abs = os.path.join(dest_dir, os.path.basename(src_abs))
+        if os.path.abspath(dst_abs) == src_abs:
+            return dst_abs
+
+        if os.path.exists(dst_abs):
+            base, ext = os.path.splitext(dst_abs)
+            try:
+                import time as _time
+
+                stamp = _time.strftime("%H%M%S")
+            except Exception:
+                stamp = "dup"
+            dst_abs = f"{base}_{stamp}{ext}"
+
+        try:
+            os.replace(src_abs, dst_abs)
+        except Exception:
+            # Fallback copia si el move falla
+            try:
+                with open(src_abs, "rb") as fsrc, open(dst_abs, "wb") as fdst:
+                    fdst.write(fsrc.read())
+            except Exception:
+                return None
+            try:
+                os.remove(src_abs)
+            except Exception:
+                pass
+
+        return dst_abs
+
+    moved_video_final = _move(video_final)
+    moved_video_intro = _move(video_con_intro)
+    export_video = moved_video_intro or moved_video_final
+
+    export_info: Dict[str, Any] = {
+        "export_dir": _rel_from_cwd(dest_dir),
+        "export_video": _rel_from_cwd(export_video) if export_video else None,
+        "moved": {
+            "video_final": _rel_from_cwd(moved_video_final) if moved_video_final else None,
+            "video_con_intro": _rel_from_cwd(moved_video_intro) if moved_video_intro else None,
+        },
+    }
+
+    try:
+        p = os.path.join(carpeta_plan, "EXPORT_VIDEO.txt")
+        with open(p, "w", encoding="utf-8") as f:
+            f.write((export_info.get("export_video") or "") + "\n")
+    except Exception:
+        pass
+
+    return export_video, export_info
+
+
 def check_text_llm_ready() -> bool:
     try:
-        _ = _ollama_generate("Reply only with: OK", temperature=0.0, max_tokens=8, model=OLLAMA_TEXT_MODEL_SHORT)
+        _ = _ollama_generate("Reply only with: OK", temperature=0.0, max_tokens=8, model=settings.ollama_text_model_short)
         return True
     except Exception as e:
         print(f"[CUSTOM] ❌ Ollama no está listo para generar guiones: {e}")
@@ -452,6 +466,20 @@ def _extract_hook_from_brief(brief: str) -> str:
     hook = (m.group(1) or "").strip()
     hook = re.sub(r"\s+", " ", hook)
     return hook
+
+
+def _extract_tone_from_brief(brief: str) -> str:
+    b = (brief or "").strip()
+    if not b:
+        return ""
+
+    m = re.search(r"(?is)\btono\s*:\s*(\"[^\"]{2,140}\"|[^\n]{2,140})", b)
+    if not m:
+        return ""
+
+    tone = (m.group(1) or "").strip().strip('"')
+    tone = re.sub(r"\s+", " ", tone)
+    return tone
 
 
 def _tiene_saludo_o_outro(texto: str) -> bool:
@@ -502,23 +530,35 @@ def _prompt_rewrite_opening_segment(
     if hook_line:
         hook_line = re.sub(r"\s+", " ", hook_line)
 
+    is_doc_long = int(target_seconds) >= 300
+    role_line = (
+        "Actúa como un editor experto de documentales de YouTube en español (México) especializado en RETENCIÓN. "
+        if is_doc_long
+        else "Eres guionista/editor de YouTube Shorts en español especializado en RETENCIÓN. "
+    )
+
     return (
-        "Eres guionista de YouTube Shorts en español especializado en RETENCIÓN. "
-        "Reescribe SOLO el PRIMER segmento para que sea un HOOK agresivo y curioso. "
-        "Debe enganchar en 1 segundo, sin saludos ni introducciones flojas.\n"
-        f"BRIEF: {brief}\n"
-        f"DATOS RAPIDOS: {contexto_line}\n"
-        f"HOOK_OBLIGATORIO: {hook_line}\n"
-        f"SEGMENTO_ACTUAL_JSON: {seg_json}\n\n"
-        "REGLAS ESTRICTAS:\n"
-        "- text_es DEBE EMPEZAR EXACTAMENTE con HOOK_OBLIGATORIO (primera oración).\n"
-        "- PROHIBIDO: 'hola', 'bienvenidos', 'hoy', 'en este video', 'suscríbete', 'dale like'.\n"
-        "- Abre un 'open loop': deja algo pendiente que se resuelve en el siguiente segmento.\n"
-        "- Frases cortas, ritmo rápido, cero relleno.\n"
-        "- Mantén el mismo tema; no inventes afirmaciones dudosas.\n\n"
-        "Devuelve SOLO un objeto JSON con claves exactas: text_es, image_query, image_prompt, note. "
-        f"text_es debe tener {wmin}-{wmax} palabras. "
-        "JSON válido, nada más."
+        role_line
+        + "Reescribe SOLO el PRIMER segmento para que sea un HOOK agresivo y curioso. "
+        + "Debe enganchar en 1 segundo, sin saludos ni introducciones flojas.\n"
+        + f"BRIEF: {brief}\n"
+        + f"DATOS RAPIDOS: {contexto_line}\n"
+        + f"HOOK_OBLIGATORIO: {hook_line}\n"
+        + f"SEGMENTO_ACTUAL_JSON: {seg_json}\n\n"
+        + "REGLAS ESTRICTAS:\n"
+        + "- text_es DEBE EMPEZAR EXACTAMENTE con HOOK_OBLIGATORIO (primera oración).\n"
+        + "- PROHIBIDO: 'hola', 'bienvenidos', 'hoy', 'en este video', 'suscríbete', 'dale like'.\n"
+        + (
+            "- Usa una escena dramática o paradoja, y plantea una GRAN PREGUNTA que se responderá al final.\n"
+            if is_doc_long
+            else ""
+        )
+        + "- Abre un 'open loop': deja algo pendiente que se resuelve en el siguiente segmento.\n"
+        + "- Frases cortas, ritmo rápido, cero relleno.\n"
+        + "- Mantén el mismo tema; no inventes afirmaciones dudosas.\n\n"
+        + "Devuelve SOLO un objeto JSON con claves exactas: text_es, image_query, image_prompt, note. "
+        + f"text_es debe tener {wmin}-{wmax} palabras. "
+        + "JSON válido, nada más."
     )
 
 
@@ -660,25 +700,28 @@ def _prompt_rewrite_closing_segment(brief: str, contexto: str, last_segment: Dic
         wmin, wmax = 70, 140
     else:
         wmin, wmax = 25, 65
+    is_doc_long = int(target_seconds) >= 300
     return (
-        "Eres guionista de YouTube en español. Reescribe SOLO el ÚLTIMO segmento para que sea un cierre con un DATO CURIOSO FINAL. "
-        "Tono: energético y humano (no plano), con sarcasmo ligero y, si encaja, un chiste corto (sin groserías ni humor ofensivo). "
-        "No cierres con frases vagas tipo 'exploramos el mundo mágico'. Debe quedar una idea concreta memorable.\n"
-        f"BRIEF: {brief}\n"
-        f"DATOS RAPIDOS: {contexto_line}\n"
-        f"SEGMENTO_ACTUAL_JSON: {last_json}\n\n"
-        "Devuelve SOLO un objeto JSON con claves exactas: text_es, image_query, image_prompt, note. "
-        f"text_es debe tener {wmin}-{wmax} palabras. "
-        "Incluye explícitamente una frase tipo 'Dato curioso final:' o '¿Sabías que...?' PERO con el dato completo en la misma oración. "
-        "PROHIBIDO usar puntos suspensivos '...'. No dejes preguntas incompletas. "
-        "El dato debe ser específico (nombres propios, obra/película/libro, o detalle verificable). "
-        "JSON válido, nada más."
+        ("Actúa como un guionista senior de documentales para YouTube en español (México). " if is_doc_long else "Eres guionista de YouTube en español. ")
+        + "Reescribe SOLO el ÚLTIMO segmento para que sea un cierre con un DATO CURIOSO FINAL. "
+        + "Tono: energético y humano (no plano), con sarcasmo ligero y, si encaja, un chiste corto (sin groserías ni humor ofensivo). "
+        + "No cierres con frases vagas tipo 'exploramos el mundo mágico'. Debe quedar una idea concreta memorable.\n"
+        + f"BRIEF: {brief}\n"
+        + f"DATOS RAPIDOS: {contexto_line}\n"
+        + f"SEGMENTO_ACTUAL_JSON: {last_json}\n\n"
+        + "Devuelve SOLO un objeto JSON con claves exactas: text_es, image_query, image_prompt, note. "
+        + f"text_es debe tener {wmin}-{wmax} palabras. "
+        + "Incluye explícitamente una frase tipo 'Dato curioso final:' o '¿Sabías que...?' PERO con el dato completo en la misma oración. "
+        + "PROHIBIDO usar puntos suspensivos '...'. No dejes preguntas incompletas. "
+        + "El dato debe ser específico (nombres propios, obra/película/libro, o detalle verificable). "
+        + ("Cierra el círculo narrativo: referencia algo del inicio y deja una reflexión concreta. " if is_doc_long else "")
+        + "JSON válido, nada más."
     )
 
 
 def _infer_target_seconds_from_brief(brief: str) -> int:
     _ = brief
-    return int(DEFAULT_CUSTOM_MIN_VIDEO_SEC)
+    return int(settings.custom_min_video_sec)
 
 
 def _target_word_range(min_seconds: int) -> tuple[int, int]:
@@ -732,152 +775,22 @@ def _generar_timeline(prompts: List[str], dur_est: float) -> List[Dict[str, Any]
 
 
 def _extract_json_value(raw: str) -> Any:
-    raw = (raw or "").strip()
-    if not raw:
-        raise ValueError("Respuesta vacía del LLM")
-
-    raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE).strip()
-    raw = re.sub(r"\s*```$", "", raw).strip()
-    if not raw:
-        raise ValueError("Respuesta vacía del LLM (tras remover markdown)")
-
-    try:
-        return json.loads(raw)
-    except Exception:
-        pass
-
-    o_s = raw.find("{")
-    o_e = raw.rfind("}")
-    if o_s != -1 and o_e != -1 and o_e > o_s:
-        chunk = raw[o_s : o_e + 1]
-        try:
-                                                                                      
-            chunk = re.sub(r",\s*([\]}])", r"\1", chunk)
-            return json.loads(chunk)
-        except Exception:
-            pass
-
-    a_s = raw.find("[")
-    a_e = raw.rfind("]")
-    if a_s != -1 and a_e != -1 and a_e > a_s:
-        chunk = raw[a_s : a_e + 1]
-        try:
-            chunk = re.sub(r",\s*([\]}])", r"\1", chunk)
-            return json.loads(chunk)
-        except Exception:
-            pass
-
-    raise ValueError("No se encontró JSON parseable en la respuesta del LLM")
-
+    return llm_client._extract_json_value(raw)
 
 def _extract_json_object(raw: str) -> Dict[str, Any]:
-    obj = _extract_json_value(raw)
-    if isinstance(obj, dict):
-        return obj
-                                        
-    preview = (raw or "")[:500]
-    print(f"[CUSTOM] ❌ La respuesta del LLM no fue un objeto JSON. Preview: {preview}...")
-    raise ValueError("La respuesta del LLM no fue un objeto JSON")
-
+    val = llm_client._extract_json_value(raw)
+    if isinstance(val, dict):
+        return val
+    raise ValueError("Not a JSON object")
 
 def _extract_json_array(raw: str) -> List[Any]:
-    obj = _extract_json_value(raw)
-    if isinstance(obj, list):
-        return obj
-    raise ValueError("La respuesta del LLM no fue un array JSON")
-
-
-def _raise_ollama_http_error(resp: requests.Response, *, model: str) -> None:
-    body = (resp.text or "").strip()
-                                      
-    if len(body) > 1500:
-        body = body[:1500] + "..."
-
-    hint = ""
-    low = body.lower()
-    if "model" in low and ("not found" in low or "no such" in low or "does not exist" in low):
-        hint = (
-            "\n[CUSTOM] 💡 Hint: el modelo no está disponible en Ollama. "
-            f"Prueba: `ollama pull {model}` o setea `OLLAMA_TEXT_MODEL` a un modelo que tengas en `ollama list`."
-        )
-    elif "out of memory" in low or "oom" in low or "cuda" in low or "vram" in low or "requires more system memory" in low:
-        hint = (
-            "\n[CUSTOM] 💡 Hint: parece falta de RAM/VRAM. "
-            "Manteniendo Gemma 2, prueba `gemma2:2b` (recomendado) o `gemma2:9b` vía `OLLAMA_TEXT_MODEL`."
-        )
-    elif resp.status_code == 404:
-        hint = "\n[CUSTOM] 💡 Hint: revisa `OLLAMA_URL` (debe apuntar a `http://localhost:11434/api/generate`)."
-
-    msg = f"Ollama HTTP {resp.status_code} al generar con modelo '{model}'."
-    if body:
-        msg += f"\nOllama dice: {body}"
-    if hint:
-        msg += hint
-    raise RuntimeError(msg)
-
-
-def _ollama_extra_options() -> dict:
-    if not OLLAMA_OPTIONS_JSON:
-        return {}
-    try:
-        obj = json.loads(OLLAMA_OPTIONS_JSON)
-        return obj if isinstance(obj, dict) else {}
-    except Exception:
-        print("[CUSTOM] ⚠️ OLLAMA_OPTIONS_JSON no es JSON válido; ignorando")
-        return {}
-
+    val = llm_client._extract_json_value(raw)
+    if isinstance(val, list):
+        return val
+    raise ValueError("Not a JSON array")
 
 def _ollama_generate(prompt: str, *, temperature: float = 0.65, max_tokens: int = 900, model: str | None = None) -> str:
-    model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
-    extra = _ollama_extra_options()
-    options = {
-        "temperature": temperature,
-        "num_predict": max_tokens,
-    }
-                                                                                      
-    if "num_ctx" not in extra:
-        options["num_ctx"] = max(256, int(OLLAMA_TEXT_NUM_CTX_DEFAULT))
-    options.update(extra)
-
-    payload = {
-        "model": model_name,
-        "prompt": prompt,
-        "stream": False,
-        "options": options,
-    }
-
-    last_err: Exception | None = None
-    for attempt in range(2):
-        try:
-            try:
-                resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
-            except requests.exceptions.ConnectionError as e:
-                raise RuntimeError(
-                    f"No se pudo conectar a Ollama en {OLLAMA_URL}. "
-                    "¿Está corriendo `ollama serve`/la app de Ollama?"
-                ) from e
-
-            if resp.status_code >= 400:
-                _raise_ollama_http_error(resp, model=model_name)
-            data = resp.json()
-            maybe_print_ollama_speed(data, tag="CUSTOM")
-            text = (data.get("response") or "").strip()
-            return text
-        except Exception as e:
-            last_err = e
-            if attempt == 0:
-                                                                          
-                                                                                         
-                payload["options"]["num_ctx"] = max(256, int(payload["options"].get("num_ctx") or 2048) // 2)
-                payload["options"]["num_predict"] = max(128, int(payload["options"].get("num_predict") or max_tokens) // 2)
-                print(
-                    f"[CUSTOM] ⚠️ Reintentando Ollama con menos contexto/tokens "
-                    f"(num_ctx={payload['options']['num_ctx']}, num_predict={payload['options']['num_predict']})"
-                )
-                continue
-            break
-    raise last_err
-
+    return llm_client.generate(prompt, temperature=temperature, max_tokens=max_tokens, model=model)
 
 def _ollama_generate_with_timeout(
     prompt: str,
@@ -888,40 +801,7 @@ def _ollama_generate_with_timeout(
     min_ctx: int = None,
     model: str | None = None,
 ) -> str:
-    model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
-    extra = _ollama_extra_options()
-    options = {
-        "temperature": temperature,
-        "num_predict": max_tokens,
-    }
-    if "num_ctx" not in extra:
-                                                                            
-        default_ctx = min_ctx if min_ctx else int(OLLAMA_TEXT_NUM_CTX_DEFAULT)
-        options["num_ctx"] = max(256, default_ctx)
-    options.update(extra)
-    payload = {
-        "model": model_name,
-        "prompt": prompt,
-        "stream": False,
-        "options": options,
-    }
-    try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=timeout_sec)
-    except requests.exceptions.ConnectionError as e:
-        raise RuntimeError(
-            f"No se pudo conectar a Ollama en {OLLAMA_URL}. "
-            "¿Está corriendo `ollama serve`/la app de Ollama?"
-        ) from e
-
-    if resp.status_code >= 400:
-        _raise_ollama_http_error(resp, model=model_name)
-    data = resp.json()
-    maybe_print_ollama_speed(data, tag="CUSTOM")
-    text = (data.get("response") or "").strip()
-    if not text:
-        raise RuntimeError("Ollama devolvió una respuesta vacía")
-    return text
-
+    return llm_client.generate(prompt, temperature=temperature, max_tokens=max_tokens, timeout_sec=timeout_sec, model=model, min_ctx=min_ctx)
 
 def _ollama_generate_json(
     prompt: str,
@@ -930,9 +810,7 @@ def _ollama_generate_json(
     max_tokens: int = 900,
     model: str | None = None,
 ) -> Dict[str, Any]:
-    raw = _ollama_generate(prompt, temperature=temperature, max_tokens=max_tokens, model=model)
-    return _extract_json_object(raw)
-
+    return llm_client.generate_json(prompt, temperature=temperature, max_tokens=max_tokens, model=model)
 
 def _ollama_generate_json_with_timeout(
     prompt: str,
@@ -943,84 +821,8 @@ def _ollama_generate_json_with_timeout(
     min_ctx: int = None,
     model: str | None = None,
 ) -> Dict[str, Any]:
-    def _prompt_fix_invalid_json(bad_raw: str, err: Exception) -> str:
-        bad = (bad_raw or "").strip()
-                                
-        if len(bad) > 8000:
-            bad = bad[:8000]
-        return (
-            "You returned INVALID JSON. Fix it and return ONLY valid JSON. "
-            "Do not add commentary, markdown, or extra keys. Preserve meaning.\n"
-            f"PARSER_ERROR: {err}\n"
-            "INVALID_JSON_START\n"
-            f"{bad}\n"
-            "INVALID_JSON_END\n"
-        )
-    
-    def _is_memory_error(err: Exception) -> bool:
-        err_str = str(err).lower()
-        return any(keyword in err_str for keyword in [
-            "cublas", "cuda", "out of memory", "vram", 
-            "llama runner process has terminated", "internal_error"
-        ])
+    return llm_client.generate_json(prompt, temperature=temperature, max_tokens=max_tokens, timeout_sec=timeout_sec, model=model, min_ctx=min_ctx)
 
-    last_err: Exception | None = None
-    raw_last = ""
-    current_max_tokens = max_tokens
-    current_min_ctx = min_ctx
-    model_name = (model or OLLAMA_TEXT_MODEL_SHORT).strip() or OLLAMA_TEXT_MODEL_SHORT
-
-                                                                
-    for attempt in range(3):
-        try:
-            raw_last = _ollama_generate_with_timeout(
-                prompt,
-                temperature=temperature,
-                max_tokens=current_max_tokens,
-                timeout_sec=timeout_sec,
-                min_ctx=current_min_ctx,
-                model=model_name,
-            )
-            return _extract_json_object(raw_last)
-        except Exception as e:
-            last_err = e
-            
-                                                                      
-            if _is_memory_error(e):
-                if attempt == 0:
-                                                                   
-                    current_min_ctx = int((current_min_ctx or 4096) * 0.4) if current_min_ctx else 1536
-                    current_max_tokens = int(current_max_tokens * 0.4)
-                    print(f"[CUSTOM] ⚠️ Error de VRAM detectado. Reintentando con ctx={current_min_ctx}, tokens={current_max_tokens}")
-                    continue
-                elif attempt == 1:
-                                                                                      
-                    current_min_ctx = int((min_ctx or 4096) * 0.15) if min_ctx else 768
-                    current_max_tokens = max(500, int(max_tokens * 0.15))
-                    print(f"[CUSTOM] ⚠️ Error de VRAM persiste. Último intento con ctx={current_min_ctx}, tokens={current_max_tokens}")
-                    continue
-            else:
-                                                         
-                temperature = min(0.8, max(0.2, temperature + 0.05))
-
-                                                                               
-    if raw_last:
-        for _ in range(2):
-            try:
-                fix_prompt = _prompt_fix_invalid_json(raw_last, last_err or Exception("invalid json"))
-                raw_last = _ollama_generate_with_timeout(
-                    fix_prompt,
-                    temperature=0.2,
-                    max_tokens=max_tokens,
-                    timeout_sec=timeout_sec,
-                    min_ctx=min_ctx,
-                    model=model_name,
-                )
-                return _extract_json_object(raw_last)
-            except Exception as e:
-                last_err = e
-
-    raise last_err or RuntimeError("No se pudo generar JSON con Ollama")
 
 
 def _query_matches(query: str, title: str, url: str) -> bool:
@@ -1518,7 +1320,7 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
             "safesearch": "off",
         }
         if _DDG_BACKEND == "ddgs":
-            kwargs["backend"] = DDG_IMAGES_BACKEND
+            kwargs["backend"] = settings.ddg_images_backend
 
         def _run() -> list[dict]:
             with DDGS() as ddgs:
@@ -1526,9 +1328,9 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
             fut = ex.submit(_run)
-            res = fut.result(timeout=max(5.0, float(DDG_SEARCH_TIMEOUT_SEC)))
+            res = fut.result(timeout=max(5.0, float(settings.ddg_search_timeout_sec)))
     except concurrent.futures.TimeoutError:
-        print(f"[IMG-DDG] Timeout buscando imágenes (>{DDG_SEARCH_TIMEOUT_SEC:.0f}s): {query[:120]}")
+        print(f"[IMG-DDG] Timeout buscando imágenes (>{settings.ddg_search_timeout_sec:.0f}s): {query[:120]}")
         return []
     except Exception as e:
         print(f"[IMG-DDG] Falló búsqueda ({_DDG_BACKEND}): {e}")
@@ -1621,7 +1423,7 @@ def _buscar_openverse_imagenes(query: str, *, max_results: int = 8) -> list[Tupl
     headers = {"User-Agent": USER_AGENT}
 
     try:
-        resp = requests.get(OPENVERSE_API, params=params, headers=headers, timeout=max(5.0, float(OPENVERSE_TIMEOUT_SEC)))
+        resp = requests.get(OPENVERSE_API, params=params, headers=headers, timeout=max(5.0, float(settings.openverse_timeout_sec)))
         if resp.status_code == 429:
             return []
         resp.raise_for_status()
@@ -1664,7 +1466,7 @@ def _buscar_openverse_imagenes(query: str, *, max_results: int = 8) -> list[Tupl
 
 
 def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[str, str, str]]:
-    sources = [s.strip() for s in (IMG_SOURCES or "").split(",") if s.strip()]
+    sources = [s.strip() for s in (settings.img_sources or "").split(",") if s.strip()]
     if not sources:
         sources = ["ddg", "openverse", "wikimedia"]
 
@@ -1706,9 +1508,9 @@ def _puntuar_con_moondream(path: str, query: str, *, note: str = "") -> int:
             path,
             query,
             note=note,
-            model=VISION_MODEL,
-            timeout_sec=VISION_TIMEOUT_SEC,
-            retries=VISION_RETRIES,
+            model=settings.vision_model,
+            timeout_sec=settings.vision_timeout_sec,
+            retries=settings.vision_retries,
         )
         _VISION_AVAILABLE = True
         return int(score)
@@ -1733,13 +1535,13 @@ def descargar_mejores_imagenes_ddg(
     os.makedirs(cand_dir, exist_ok=True)
 
                                                                                        
-    if max_per_query == 8 and CUSTOM_IMG_MAX_PER_QUERY != 8:
-        max_per_query = max(1, int(CUSTOM_IMG_MAX_PER_QUERY))
+    if max_per_query == 8 and settings.custom_img_max_per_query != 8:
+        max_per_query = max(1, int(settings.custom_img_max_per_query))
 
                                                                     
-    if CUSTOM_IMG_QUALITY in {"high", "alta"}:
+    if settings.custom_img_quality in {"high", "alta"}:
         max_per_query = max(max_per_query, 14)
-    elif CUSTOM_IMG_QUALITY in {"best", "max", "maxima", "máxima"}:
+    elif settings.custom_img_quality in {"best", "max", "maxima", "máxima"}:
         max_per_query = max(max_per_query, 24)
 
     if segment_numbers is not None and len(segment_numbers) != len(queries):
@@ -1763,12 +1565,12 @@ def descargar_mejores_imagenes_ddg(
         note = notes[idx] if idx < len(notes) else ""
 
         seg_n = (segment_numbers[idx] if segment_numbers is not None else (idx + 1))
-        is_hook = int(seg_n) <= int(CUSTOM_HOOK_SEGMENTS)
+        is_hook = int(seg_n) <= int(settings.custom_hook_segments)
 
                                                                                                                   
         local_max = int(max_per_query)
         if is_hook:
-            local_max = max(local_max, int(max_per_query) + max(0, int(CUSTOM_HOOK_EXTRA_CANDIDATES)))
+            local_max = max(local_max, int(max_per_query) + max(0, int(settings.custom_hook_extra_candidates)))
 
         candidatos = _buscar_imagenes_multi(q, max_results=local_max)
         if is_hook:
@@ -1783,7 +1585,7 @@ def descargar_mejores_imagenes_ddg(
             candidatos = _uniq_candidates(merged)[: max(local_max, len(candidatos))]
 
                                                                                    
-        if ENABLE_TEXT_RANK and candidatos:
+        if settings.enable_text_rank and candidatos:
             kw = _extract_keywords(f"{q} {note}", max_keywords=10)
             if kw:
                 candidatos = sorted(
@@ -1823,7 +1625,7 @@ def descargar_mejores_imagenes_ddg(
                         "candidates": [],
                         "selected": {
                             "candidate_index": 1,
-                            "score": int(max(1, MIN_IMG_SCORE)),
+                            "score": int(max(1, settings.custom_min_img_score)),
                             "url": wiki_url,
                             "title": "Wikimedia Commons",
                             "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
@@ -1898,12 +1700,12 @@ def descargar_mejores_imagenes_ddg(
                     best_path = saved
                     best_url = wiki_url
                     best_title = "Wikimedia Commons"
-                    best_score = max(1, int(MIN_IMG_SCORE))
+                    best_score = max(1, int(settings.custom_min_img_score))
                     best_k = 1
 
                                                                                                          
-        if is_hook and best_score < int(CUSTOM_HOOK_MIN_IMG_SCORE):
-            extra_max = max(local_max, int(max_per_query) + int(CUSTOM_HOOK_EXTRA_CANDIDATES) + 12)
+        if is_hook and best_score < int(settings.custom_hook_min_img_score):
+            extra_max = max(local_max, int(max_per_query) + int(settings.custom_hook_extra_candidates) + 12)
             variants2 = [
                 q,
                 f"{q} close up",
@@ -1955,8 +1757,8 @@ def descargar_mejores_imagenes_ddg(
                     break
 
                                                                                                         
-        if (best_score < int(MIN_IMG_SCORE)) and (CUSTOM_IMG_QUALITY in {"high", "alta", "best", "max", "maxima", "máxima"}):
-            extra = 32 if CUSTOM_IMG_QUALITY in {"best", "max", "maxima", "máxima"} else 20
+        if (best_score < int(settings.custom_min_img_score)) and (settings.custom_img_quality in {"high", "alta", "best", "max", "maxima", "máxima"}):
+            extra = 32 if settings.custom_img_quality in {"best", "max", "maxima", "máxima"} else 20
             candidatos2 = _buscar_imagenes_multi(q, max_results=max(max_per_query, extra))
                                              
             seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
@@ -1995,7 +1797,7 @@ def descargar_mejores_imagenes_ddg(
                     break
 
         selected = None
-        if best_path and best_score >= int(MIN_IMG_SCORE):
+        if best_path and best_score >= int(settings.custom_min_img_score):
                                                            
             ext = os.path.splitext(best_path)[1].lower() or ".jpg"
             stable = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
@@ -2284,8 +2086,8 @@ def generar_titulo_youtube(brief: str, script_es: str) -> str:
         prompt,
         temperature=0.55,
         max_tokens=180,
-        timeout_sec=max(OLLAMA_TIMEOUT, 60),
-        model=OLLAMA_TEXT_MODEL_SHORT,
+        timeout_sec=max(settings.ollama_timeout, 60),
+        model=settings.ollama_text_model_short,
     )
     titulo = (titulo or "").strip().strip('"').strip("'")
     titulo = re.sub(r"\s+", " ", titulo).strip()
@@ -2361,8 +2163,8 @@ def _generar_hashtags_shorts(brief: str, title_es: str, script_es: str) -> list[
         prompt,
         temperature=0.35,
         max_tokens=60,
-        timeout_sec=max(OLLAMA_TIMEOUT, 60),
-        model=OLLAMA_TEXT_MODEL_SHORT,
+        timeout_sec=max(settings.ollama_timeout, 60),
+        model=settings.ollama_text_model_short,
     )
     tags = _extraer_hashtags(raw)
 
@@ -2515,6 +2317,7 @@ def _prompt_plan(
     target_seconds: int,
     max_prompts: int = 12,
     hook_hint: str = "",
+    tone_hint: str = "",
 ) -> str:
     contexto_line = contexto if contexto else "Sin contexto web disponible, apóyate en conocimiento general y datos comprobables."
     target_seconds = int(max(15, target_seconds))
@@ -2523,10 +2326,22 @@ def _prompt_plan(
     if target_seconds >= 300:
                                                                               
                                                                                    
-        seg_min, seg_max = 12, 16
-        total_words_min, total_words_max = 650, 950
-        per_seg_min, per_seg_max = 45, 80
-        humor_line = "Incluye sarcasmo ligero y humor inteligente (1-2 chistes cortos por minuto, no stand-up). "
+        # Escala para 5-20 minutos. Para 5 min, _target_word_range da ~650-950.
+        total_words_min, total_words_max = _target_word_range(target_seconds)
+
+        if target_seconds >= 480:
+            # Documental largo (8-20 min): segmentos más densos.
+            per_seg_min, per_seg_max = 70, 120
+            # Aproximación: ~95 palabras por segmento.
+            approx_segments = int(round(((total_words_min + total_words_max) / 2.0) / 95.0))
+            approx_segments = max(18, min(44, approx_segments))
+            seg_min, seg_max = max(18, approx_segments - 6), min(48, approx_segments + 6)
+            humor_line = "Incluye sarcasmo ligero y humor inteligente (1-2 chistes cortos por minuto, no stand-up). "
+        else:
+            # Largo estándar (~5-8 min)
+            seg_min, seg_max = 12, 18
+            per_seg_min, per_seg_max = 45, 85
+            humor_line = "Incluye sarcasmo ligero y humor inteligente (1-2 chistes cortos por minuto, no stand-up). "
     else:
                                    
         seg_min, seg_max = 6, 10
@@ -2545,12 +2360,123 @@ def _prompt_plan(
     hook_hint = re.sub(r"\s+", " ", (hook_hint or "").strip())
     hook_line = f"GANCHO_OBLIGATORIO (si aplica): {hook_hint}\n" if hook_hint else ""
 
+    tone_hint = re.sub(r"\s+", " ", (tone_hint or "").strip())
+    tone_line = f"TONO (si aplica): {tone_hint}\n" if tone_hint else ""
+
+    # Prompt maestro para Shorts (60s). Mantiene salida JSON para el pipeline.
+    if target_seconds <= 75:
+        return (
+            "Actúa como un editor experto de YouTube Shorts. Tu objetivo es la Retención Máxima. "
+            "Escribe un guion sobre: [TEMA].\n\n"
+            "REGLAS CRÍTICAS:\n\n"
+            "- NADA de saludos ('Hola', 'Bienvenidos'). Empieza con el dato más brutal en el segundo 0.\n"
+            "- 0-3s (El Gancho): una frase visual o polémica que obligue a no deslizar.\n"
+            "- 3-15s (El Contexto): explica el problema rápido.\n"
+            "- 15-45s (El Desarrollo): datos curiosos rápidos.\n"
+            "- 45-60s (Cierre Cíclico): una frase que conecte con el inicio (Loop).\n\n"
+            "Tono: [TONO]. Usa lenguaje coloquial de México, directo y rápido.\n"
+            "Formato: dame el guion listo para TTS (Texto a Voz).\n\n"
+            "---\n"
+            "IMPORTANTE: Este proyecto usa imágenes REALES de internet (no IA). Debes alinear el guion con búsquedas de fotos reales.\n"
+            "Sustituye [TEMA] usando BRIEF. Sustituye [TONO] usando TONO si se proporciona.\n\n"
+            f"BRIEF (TEMA): {brief}\n"
+            f"DATOS RAPIDOS: {contexto_line}\n"
+            + hook_line
+            + tone_line
+            + "\n"
+            "MAPEO A SEGMENTOS (OBLIGATORIO):\n"
+            "- segments debe tener EXACTAMENTE 6 objetos, en orden: \n"
+            "  1) Hook (0-3s)\n"
+            "  2) Contexto (3-15s)\n"
+            "  3) Desarrollo (15-28s)\n"
+            "  4) Desarrollo (28-38s)\n"
+            "  5) Desarrollo (38-45s)\n"
+            "  6) Cierre cíclico (45-60s) que haga LOOP y conecte con el Hook.\n"
+            "- PROHIBIDO: 'suscríbete', 'dale like', despedidas, muletillas de intro.\n"
+            "- El primer segmento debe ser brutal y abrir un 'open loop'.\n"
+            "- El último segmento debe cerrar con LOOP: referencia clara a la idea/frase del Hook sin repetirlo literal palabra por palabra.\n"
+            "- Contenido verificable y específico; cero relleno.\n\n"
+            "FORMATO DE RESPUESTA OBLIGATORIO:\n"
+            "- Responde SOLO con un objeto JSON válido, sin texto adicional.\n"
+            "- NO uses markdown.\n\n"
+            "Entrega SOLO JSON con estas claves:\n"
+            "- title_es: titulo atractivo (<=80 chars).\n"
+            "- hook_es: UNA sola frase de gancho inmediato (no lista).\n"
+            "- segments: lista de 6 objetos. Cada objeto: {\n"
+            f"    text_es: parte del guion en español ({per_seg_min}-{per_seg_max} palabras) para narrar en TTS;\n"
+            "    image_query: frase corta en ingles para buscar foto real exacta;\n"
+            "    image_prompt: descripcion en ingles de la escena para contexto visual;\n"
+            "    note: detalle breve de lo que debe verse para validar que coincide.\n"
+            "  }.\n"
+            "- script_es: concatenación de todos los text_es en orden, como guion completo.\n"
+            f"Verificación interna: el script_es final debe tener aprox {total_words_min}-{total_words_max} palabras.\n"
+            "NO agregues comentarios adicionales, SOLO el objeto JSON válido."
+        )
+
+    # Prompt maestro documental (>=5 min). Mantiene salida JSON para el pipeline.
+    # Nota: NO ponemos etiquetas [VISUAL]/[SONIDO] dentro de text_es porque TTS las leería.
+    # En su lugar, empujamos la guía visual a note/image_prompt.
+    if target_seconds >= 300:
+        tone_fill = tone_hint or "Narrativo, misterio/tecnología, profesional con carisma"
+
+        # Segmentos objetivo escalados a la duración.
+        wmin_doc, wmax_doc = _target_word_range(target_seconds)
+        avg_words_doc = (wmin_doc + wmax_doc) / 2.0
+        # Para 5-8 min: segmentos más cortos; para 8-20: segmentos más densos.
+        words_per_seg = 70.0 if target_seconds < 480 else 95.0
+        approx_segments = int(round(avg_words_doc / max(55.0, words_per_seg)))
+        approx_segments = max(12, min(44, approx_segments))
+        seg_min_doc, seg_max_doc = max(12, approx_segments - 5), min(48, approx_segments + 6)
+
+        seg_word_line = "45-85" if target_seconds < 480 else "70-120"
+        return (
+            "Actúa como un Guionista Senior de Documentales para YouTube, experto en retención de audiencia y Storytelling.\n\n"
+            "Tu Misión: escribir el guion completo para un video de análisis profundo sobre el tema del BRIEF.\n"
+            "Configuración de Idioma: Español de México (neutro, profesional pero con carisma).\n\n"
+            "Estructura narrativa obligatoria (a escala del video):\n"
+            "- Hook (0:00-1:00): no saludes. Empieza con escena dramática/dato chocante/paradoja. Plantea la GRAN PREGUNTA que se responderá al final.\n"
+            "- Contexto (1:00-3:00): cómo era el mundo antes; establece reglas; crea tensión/nostalgia.\n"
+            "- Conflicto (3:00-6:00): el problema central con 'Pero entonces...'. Explica lo técnico con analogías simples.\n"
+            "- Clímax/caída (6:00-8:00): el punto exacto donde todo cambió; tono dramático.\n"
+            "- Conclusión/reflexión (8:00-10:00+): cierra el círculo volviendo al inicio, responde la gran pregunta y deja una lección.\n\n"
+            "REGLAS CRÍTICAS DE RETENCIÓN:\n"
+            "- Nada de saludos, nada de 'en este video', nada de 'suscríbete/like'.\n"
+            "- Cada segmento debe aportar un dato NUEVO, concreto y verificable (no paja).\n"
+            "- Estilo: narrativo, como misterio/crimen incluso si es tecnología. Une puntos con narrativa, evita listas aburridas.\n"
+            f"TONO: {tone_fill}.\n\n"
+            "IMPORTANTE SOBRE VISUALES:\n"
+            "- text_es debe ser SOLO narración (TTS).\n"
+            "- Las ideas visuales van en note (español) y en image_prompt (inglés).\n"
+            "- image_query debe ser una búsqueda corta en inglés para una foto/clip REAL.\n\n"
+            f"BRIEF: {brief}\n"
+            f"DATOS RAPIDOS: {contexto_line}\n"
+            + hook_line
+            + tone_line
+            + "\n"
+            "FORMATO DE RESPUESTA OBLIGATORIO:\n"
+            "- Responde SOLO con un objeto JSON válido (sin markdown).\n\n"
+            "Entrega SOLO JSON con estas claves:\n"
+            "- title_es: titulo atractivo (<=80 chars).\n"
+            "- hook_es: UNA sola frase de gancho inmediato (no lista).\n"
+            f"- segments: lista de {seg_min_doc}-{seg_max_doc} objetos. Cada objeto: {{\n"
+            f"    text_es: narración en español ({seg_word_line} palabras);\n"
+            "    image_query: frase corta en inglés para buscar foto real exacta;\n"
+            "    image_prompt: descripción en inglés de la escena/visual sugerido;\n"
+            "    note: guía visual en español (qué debe verse) + si aplica un [SONIDO: ...] (pero no lo metas en text_es).\n"
+            "  }.\n"
+            "- script_es: concatenación de todos los text_es en orden.\n"
+            f"Verificación interna: script_es debe durar ~{target_seconds} segundos (~{target_minutes} min) y tener aprox {wmin_doc}-{wmax_doc} palabras.\n"
+            "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' exactamente una vez y además cerrar el círculo narrativo.\n"
+            "NO agregues comentarios adicionales, SOLO el objeto JSON válido."
+        )
+
     return (
         "Eres productor de YouTube Shorts en español. Diseña un video informativo, claro y carismático para retener audiencia. "
         "Usarás imágenes REALES de internet (no IA). Necesito que alinees guion, segmentos y qué debe verse en cada momento.\n"
         f"BRIEF: {brief}\n"
         f"DATOS RAPIDOS: {contexto_line}\n\n"
         + hook_line
+        + tone_line
         + "REGLAS DE RETENCION (CRITICAS):\n"
         "- PROHIBIDO en el inicio: 'hola', 'bienvenidos', 'hoy te voy a', 'en este video', 'suscríbete', 'dale like'.\n"
         "- El PRIMER segmento (segments[0].text_es) debe empezar fuerte: una afirmación impactante + curiosidad (open loop).\n"
@@ -2611,17 +2537,23 @@ def _prompt_expand_to_min_duration(brief: str, contexto: str, plan_raw: Dict[str
     )
 
 
-def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, max_prompts: int = 12) -> Dict[str, Any]:
+def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, max_prompts: int = 12) -> VideoPlan:
     brief_in = (brief or "").strip()
     if not brief_in:
         raise ValueError("Brief vacio")
 
                                                                
-    target_seconds = int(min_seconds or DEFAULT_CUSTOM_MIN_VIDEO_SEC)
+    target_seconds = int(min_seconds or settings.custom_min_video_sec)
     if target_seconds not in (60, 300):
         target_seconds = max(60, target_seconds)
     brief = _sanitize_brief_for_duration(brief_in) or brief_in
     hook_hint = _extract_hook_from_brief(brief_in)
+    tone_hint = _extract_tone_from_brief(brief_in)
+
+    # Modo documental (chunking por capítulos) para 5-20 minutos.
+    # Se puede desactivar con env CUSTOM_LONG_CHUNKING=0.
+    doc_long = int(target_seconds) >= 300
+    chunking_enabled = (os.environ.get("CUSTOM_LONG_CHUNKING") or "1").strip().lower() not in {"0", "false", "no"}
 
     contexto = _buscar_contexto_web(brief)
 
@@ -2641,33 +2573,335 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                                                                             
     if target_seconds >= 300:
                                                                                   
-        tokens_limit = 3600 if "qwen" in model_text.lower() else 3400
-        timeout = 240
-        min_ctx = 6144 if "qwen" in model_text.lower() else 5632
+        is_qwen = "qwen" in model_text.lower()
+        # Escala suave hasta ~20 min. Conservador para no romper modelos con ctx/tokens bajos.
+        if target_seconds >= 900:
+            tokens_limit = 4600 if is_qwen else 4200
+            timeout = 360
+            min_ctx = 8192 if is_qwen else 7168
+        elif target_seconds >= 480:
+            tokens_limit = 4100 if is_qwen else 3800
+            timeout = 300
+            min_ctx = 7168 if is_qwen else 6144
+        else:
+            tokens_limit = 3600 if is_qwen else 3400
+            timeout = 240
+            min_ctx = 6144 if is_qwen else 5632
+
         print(f"[CUSTOM] 📝 Generando plan largo (~{target_seconds}s) (ctx={min_ctx}, tokens={tokens_limit})")
     else:
         tokens_limit = 2200
-        timeout = 160
+        timeout = 300
         min_ctx = None
 
-    timeout = max(OLLAMA_TIMEOUT, timeout)
+    timeout = max(settings.ollama_timeout, timeout)
 
-    for _ in range(3):
-        prompt = _prompt_plan(
+    def _prompt_doc_outline(
+        brief_txt: str,
+        contexto_txt: str,
+        *,
+        tone: str,
+        hook_force: str = "",
+        chapters_n: int,
+        target_sec: int,
+    ) -> str:
+        contexto_line2 = contexto_txt if contexto_txt else "Sin contexto web disponible, apóyate en conocimiento general y datos comprobables."
+        tone2 = tone or "Documental narrativo, profesional con carisma"
+        hook_force = re.sub(r"\s+", " ", (hook_force or "").strip())
+        hook_line2 = f"GANCHO_OBLIGATORIO (si aplica): {hook_force}\n" if hook_force else ""
+        return (
+            "Actúa como un guionista senior de documentales para YouTube, experto en retención.\n"
+            "Devuelve SOLO JSON válido. Sin markdown.\n\n"
+            f"BRIEF: {brief_txt}\n"
+            f"DATOS RAPIDOS: {contexto_line2}\n"
+            f"TONO: {tone2}\n"
+            + hook_line2
+            + "\n"
+            f"Tarea: crea un ESQUELETO (outline) de {chapters_n} capítulos para un video largo (~{max(8, int(target_sec//60))}-{max(10, int(target_sec//60)+3)} min) sobre el BRIEF.\n"
+            "Reglas: narrativa con 'Pero entonces...', analogías simples para lo técnico, y una GRAN PREGUNTA que se responde al final.\n\n"
+            "JSON requerido:\n"
+            "{\n"
+            "  title_es: string (<=80 chars),\n"
+            "  hook_es: string (1 frase corta),\n"
+            "  gran_pregunta_es: string (1 frase),\n"
+            "  chapters: [\n"
+            f"    {{ idx: 1..{chapters_n}, title_es: string, goal_es: string, key_points_es: [3-5 strings] }}\n"
+            "  ]\n"
+            "}\n\n"
+            "Si se proporciona GANCHO_OBLIGATORIO, hook_es DEBE ser exactamente ese texto."
+        )
+
+    def _prompt_doc_chapter_segments(
+        brief_txt: str,
+        contexto_txt: str,
+        *,
+        title_es: str,
+        gran_pregunta_es: str,
+        chapters: list[dict[str, Any]],
+        chapter_idx: int,
+        chapter_title: str,
+        chapter_goal: str,
+        prev_bridge_es: str,
+        n_segments: int,
+        wmin_seg: int,
+        wmax_seg: int,
+        hook_force: str = "",
+        tone: str = "",
+        is_last_chapter: bool = False,
+    ) -> str:
+        contexto_line2 = contexto_txt if contexto_txt else "Sin contexto web disponible."
+        tone2 = tone or "Documental narrativo, profesional con carisma"
+        hook_force = re.sub(r"\s+", " ", (hook_force or "").strip())
+        hook_line2 = f"GANCHO_OBLIGATORIO: {hook_force}\n" if hook_force else ""
+        chapters_str = json.dumps(chapters or [], ensure_ascii=False)[:3500]
+
+        last_rules = (
+            "- Este es el ÚLTIMO capítulo: responde explícitamente la GRAN PREGUNTA y cierra el círculo narrativo volviendo al inicio.\n"
+            "- El ÚLTIMO segmento debe incluir exactamente una vez 'Dato curioso final:' o '¿Sabías que...?' con el dato completo en la misma oración.\n"
+        ) if is_last_chapter else (
+            "- NO cierres el video aquí: no hagas conclusión final ni despedidas. Deja un puente al siguiente capítulo.\n"
+        )
+
+        return (
+            "Actúa como un Guionista Senior de Documentales para YouTube (español de México), experto en retención.\n"
+            "Genera SOLO una lista JSON (array) de segmentos para este capítulo. Sin markdown.\n\n"
+            f"VIDEO_TITLE_ES: {title_es}\n"
+            f"BRIEF: {brief_txt}\n"
+            f"DATOS RAPIDOS: {contexto_line2}\n"
+            f"TONO: {tone2}\n"
+            + hook_line2
+            + f"GRAN_PREGUNTA: {gran_pregunta_es}\n"
+            f"CHAPTER_{chapter_idx}_TITLE: {chapter_title}\n"
+            f"CHAPTER_{chapter_idx}_GOAL: {chapter_goal}\n"
+            f"CHAPTERS_OUTLINE_JSON: {chapters_str}\n"
+            + (f"PUENTE_DESDE_ANTERIOR: {prev_bridge_es}\n" if prev_bridge_es else "")
+            + "\n"
+            "REGLAS CRÍTICAS:\n"
+            "- Nada de saludos, nada de 'en este video', nada de 'suscríbete/like'.\n"
+            "- Cada segmento aporta un dato NUEVO y verificable. Evita paja.\n"
+            "- Usa narrativa tipo misterio: escena → dato → consecuencia (pero sin inventar).\n"
+            "- Lo técnico con analogías simples. Usa 'Pero entonces...' cuando encaje.\n"
+            + last_rules
+            + "\n"
+            f"Devuelve EXACTAMENTE {n_segments} segmentos. Cada segmento objeto con claves: text_es, image_query, image_prompt, note.\n"
+            f"- text_es: SOLO narración TTS en español ({wmin_seg}-{wmax_seg} palabras).\n"
+            "- image_query: búsqueda corta en inglés para una foto/clip real exacto.\n"
+            "- image_prompt: descripción en inglés del visual sugerido.\n"
+            "- note: guía visual en español (qué debe verse). Si quieres indicar audio, ponlo aquí como '[SONIDO: ...]'.\n"
+            "Devuelve JSON válido, nada más."
+        )
+
+    def _distribute_ints(total: int, weights: list[float]) -> list[int]:
+        if total <= 0:
+            return [0 for _ in weights]
+        if not weights:
+            return []
+        ws = [max(0.0, float(w)) for w in weights]
+        s = sum(ws) or 1.0
+        raw = [w / s * total for w in ws]
+        base = [int(math.floor(x)) for x in raw]
+        rem = total - sum(base)
+        # reparte el rem a los mayores decimales
+        frac = sorted([(i, raw[i] - base[i]) for i in range(len(base))], key=lambda t: t[1], reverse=True)
+        for k in range(rem):
+            base[frac[k % len(base)][0]] += 1
+        return base
+
+
+    def _doc_long_generate_with_chunking() -> tuple[Dict[str, Any], List[Dict[str, Any]], str, str, str]:
+        # 1) Outline por capítulos (escala 5-20 min)
+        if target_seconds < 480:
+            chapters_n = 4
+        elif target_seconds < 900:
+            chapters_n = 5
+        elif target_seconds < 1140:
+            chapters_n = 6
+        else:
+            chapters_n = 7
+        outline_prompt = _prompt_doc_outline(
             brief,
             contexto,
-            target_seconds=target_seconds,
-            max_prompts=max_prompts,
-            hook_hint=hook_hint,
+            tone=tone_hint,
+            hook_force=hook_hint,
+            chapters_n=chapters_n,
+            target_sec=target_seconds,
         )
-        plan = _ollama_generate_json_with_timeout(
-            prompt,
-            temperature=0.58,                                  
-            max_tokens=tokens_limit,
-            timeout_sec=timeout,
-            min_ctx=min_ctx,
+        outline = _ollama_generate_json_with_timeout(
+            outline_prompt,
+            temperature=0.6,
+            max_tokens=900,
+            timeout_sec=max(settings.ollama_timeout, 180),
             model=model_text,
         )
+
+        if not isinstance(outline, dict):
+            raise RuntimeError("Outline inválido")
+
+        title_es = str(outline.get("title_es") or "").strip() or "Video personalizado"
+        hook_es = outline.get("hook_es")
+        if isinstance(hook_es, list):
+            hook_es = hook_es[0] if hook_es else ""
+        hook_es = str(hook_es or "").strip()
+        if hook_hint:
+            hook_es = hook_hint
+        gran_pregunta_es = str(outline.get("gran_pregunta_es") or "").strip()
+        chapters = outline.get("chapters")
+        if not isinstance(chapters, list) or len(chapters) < 3:
+            raise RuntimeError("Outline sin chapters")
+
+        # Normaliza chapters a dicts simples
+        ch_norm: list[dict[str, Any]] = []
+        for c in chapters:
+            if not isinstance(c, dict):
+                continue
+            ch_norm.append({
+                "idx": int(c.get("idx") or (len(ch_norm) + 1)),
+                "title_es": str(c.get("title_es") or "").strip(),
+                "goal_es": str(c.get("goal_es") or "").strip(),
+                "key_points_es": c.get("key_points_es") if isinstance(c.get("key_points_es"), list) else [],
+            })
+        if len(ch_norm) < 3:
+            raise RuntimeError("Chapters inválidos")
+
+        # 2) Generación secuencial por capítulos
+        wmin_total, wmax_total = _target_word_range(target_seconds)
+        avg_target_words = int(round((wmin_total + wmax_total) / 2.0))
+
+        # Por segmento en doc: 5-8 min es más corto; 8-20 más denso
+        if target_seconds < 480:
+            wmin_seg, wmax_seg = 45, 85
+        else:
+            wmin_seg, wmax_seg = 70, 120
+
+        # Segmentos objetivo: 5-8 min usa chunks más pequeños; 8-20 más densos
+        words_per_seg = 70.0 if target_seconds < 480 else 95.0
+        total_segments_target = int(round(avg_target_words / max(55.0, words_per_seg)))
+        total_segments_target = max(12, min(44, total_segments_target))
+
+        # Pesos por capítulo: hook/setup/body/climax/conclusion, extendidos si hay más capítulos
+        if len(ch_norm) <= 5:
+            weights = [0.16, 0.18, 0.24, 0.22, 0.20]
+            weights = weights[: len(ch_norm)]
+        else:
+            # Reparte más capítulos al "body".
+            weights = [0.14, 0.16] + [0.10] * max(0, len(ch_norm) - 3) + [0.20]
+            # Ajuste: sube un poco el capítulo final
+            weights[-1] = 0.22
+
+        seg_plan = _distribute_ints(total_segments_target, weights)
+        # Mínimo 2 segmentos por capítulo
+        seg_plan = [max(2, int(n)) for n in seg_plan]
+
+        segs: List[Dict[str, Any]] = []
+        prev_bridge = ""
+        for idx, ch in enumerate(ch_norm, start=1):
+            nseg = seg_plan[idx - 1] if idx - 1 < len(seg_plan) else 3
+            is_last = idx == len(ch_norm)
+            p = _prompt_doc_chapter_segments(
+                brief,
+                contexto,
+                title_es=title_es,
+                gran_pregunta_es=gran_pregunta_es,
+                chapters=ch_norm,
+                chapter_idx=idx,
+                chapter_title=str(ch.get("title_es") or f"Capítulo {idx}").strip(),
+                chapter_goal=str(ch.get("goal_es") or "").strip(),
+                prev_bridge_es=prev_bridge,
+                n_segments=nseg,
+                wmin_seg=wmin_seg,
+                wmax_seg=wmax_seg,
+                hook_force=hook_es if idx == 1 else "",
+                tone=tone_hint,
+                is_last_chapter=is_last,
+            )
+            raw = _ollama_generate_with_timeout(
+                p,
+                temperature=0.6,
+                max_tokens=1400,
+                timeout_sec=max(settings.ollama_timeout, 220),
+                model=model_text,
+            )
+            try:
+                arr = _extract_json_array(raw)
+            except Exception:
+                fix = (
+                    "You returned INVALID JSON array. Fix it and return ONLY a valid JSON array.\n"
+                    "INVALID_JSON_START\n" + (raw or "")[:8000] + "\nINVALID_JSON_END\n"
+                )
+                raw2 = _ollama_generate_with_timeout(
+                    fix,
+                    temperature=0.2,
+                    max_tokens=1400,
+                    timeout_sec=max(settings.ollama_timeout, 220),
+                    model=model_text,
+                )
+                arr = _extract_json_array(raw2)
+
+            nuevos: List[Dict[str, Any]] = []
+            for s in arr:
+                if not isinstance(s, dict):
+                    continue
+                texto = str(s.get("text_es") or "").strip()
+                if not texto:
+                    continue
+                query = str(s.get("image_query") or "").strip()
+                iprompt = str(s.get("image_prompt") or "").strip() or query
+                note = str(s.get("note") or "").strip()
+                nuevos.append({
+                    "text_es": texto,
+                    "image_query": query,
+                    "image_prompt": iprompt,
+                    "note": note,
+                })
+
+            if not nuevos:
+                continue
+            segs.extend(nuevos)
+            # Puente simple: última oración del último segmento
+            try:
+                last_text = str(nuevos[-1].get("text_es") or "").strip()
+                prev_bridge = (last_text[-220:] if len(last_text) > 220 else last_text)
+            except Exception:
+                prev_bridge = ""
+
+        if not segs:
+            raise RuntimeError("No se generaron segmentos por capítulos")
+
+        script_es = " ".join([s.get("text_es", "") for s in segs]).strip()
+        if _words(script_es) < int(wmin_total * 0.60):
+            # Si salió muy corto, dejamos que el pipeline existente lo expanda luego.
+            pass
+
+        plan_obj: Dict[str, Any] = {
+            "title_es": title_es,
+            "hook_es": hook_es,
+            "script_es": script_es,
+            "segments": segs,
+            "gran_pregunta_es": gran_pregunta_es,
+            "chapters": ch_norm,
+        }
+        return plan_obj, segs, title_es, hook_es, script_es
+
+    for _ in range(3):
+        if doc_long and chunking_enabled:
+            plan, segmentos, titulo, hook, script = _doc_long_generate_with_chunking()
+        else:
+            prompt = _prompt_plan(
+                brief,
+                contexto,
+                target_seconds=target_seconds,
+                max_prompts=max_prompts,
+                hook_hint=hook_hint,
+                tone_hint=tone_hint,
+            )
+            plan = _ollama_generate_json_with_timeout(
+                prompt,
+                temperature=0.58,                                  
+                max_tokens=tokens_limit,
+                timeout_sec=timeout,
+                min_ctx=min_ctx,
+                model=model_text,
+            )
 
         titulo = str(plan.get("title_es") or "").strip()
         hook_val = plan.get("hook_es")
@@ -2756,7 +2990,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 opener_prompt,
                 temperature=0.25,
                 max_tokens=520,
-                timeout_sec=max(OLLAMA_TIMEOUT, 120),
+                timeout_sec=max(settings.ollama_timeout, 120),
             )
             if isinstance(opener_obj, dict):
                 texto = str(opener_obj.get("text_es") or "").strip()
@@ -2795,7 +3029,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 add_prompt,
                 temperature=0.55,
                 max_tokens=1800,
-                timeout_sec=max(OLLAMA_TIMEOUT, 160),
+                timeout_sec=max(settings.ollama_timeout, 300),
                 model=model_text,
             )
             try:
@@ -2810,7 +3044,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                     fix,
                     temperature=0.2,
                     max_tokens=1800,
-                    timeout_sec=max(OLLAMA_TIMEOUT, 160),
+                    timeout_sec=max(settings.ollama_timeout, 300),
                     model=model_text,
                 )
                 arr = _extract_json_array(raw2)
@@ -2855,7 +3089,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                     cierre_prompt,
                     temperature=0.25 if attempt == 1 else 0.35,
                     max_tokens=520,
-                    timeout_sec=max(OLLAMA_TIMEOUT, 120),
+                    timeout_sec=max(settings.ollama_timeout, 120),
                 )
                 if not isinstance(cierre_obj, dict):
                     continue
@@ -2883,20 +3117,21 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
     prompts_final = [s.get("image_prompt") or s.get("image_query") or "photo" for s in segmentos]
 
-    timeline = _generar_timeline(prompts_final, _estimar_segundos(script))
+    timeline_data = _generar_timeline(prompts_final, _estimar_segundos(script))
 
-    return {
-        "brief": brief_in,
-        "target_seconds": int(target_seconds),
-        "title_es": titulo or "Video personalizado",
-        "hook_es": hook,
-        "script_es": script,
-        "segments": segmentos,
-        "prompts": prompts_final,
-        "timeline": timeline,
-        "contexto_web": contexto,
-        "raw_plan": plan,
-    }
+    return VideoPlan(
+        brief=brief_in,
+        target_seconds=int(target_seconds),
+        title_es=titulo or "Video personalizado",
+        youtube_title_es=titulo or "Video personalizado",
+        hook_es=hook,
+        script_es=script,
+        segments=[ScriptSegment(**s) for s in segmentos],
+        prompts=prompts_final,
+        timeline=[TimelineItem(**t) for t in timeline_data] if timeline_data else [],
+        contexto_web=contexto,
+        raw_plan=plan,
+    )
 
 
 def generar_video_personalizado(
@@ -2909,7 +3144,8 @@ def generar_video_personalizado(
 ) -> bool:
     carpeta = crear_carpeta_proyecto(prefix="custom")
     try:
-        plan = generar_plan_personalizado(brief, min_seconds=min_seconds)
+        plan_model = generar_plan_personalizado(brief, min_seconds=min_seconds)
+        plan = plan_model.model_dump()
     except Exception as e:
         print(f"[CUSTOM] ❌ No se pudo crear el plan: {e}")
         return False
@@ -2958,7 +3194,7 @@ def generar_video_personalizado(
     try:
         yt_title = generar_titulo_youtube(brief, str(plan.get("script_es") or ""))
                                                   
-        if int(plan.get("target_seconds") or (min_seconds or DEFAULT_CUSTOM_MIN_VIDEO_SEC)) == 60:
+        if int(plan.get("target_seconds") or (min_seconds or settings.custom_min_video_sec)) == 60:
             yt_title = _append_shorts_hashtags_to_title(
                 yt_title,
                 brief=str(plan.get("brief") or brief or "").strip(),
@@ -3032,6 +3268,17 @@ def generar_video_personalizado(
         append_intro_to_video(video_final, title_text=plan.get("youtube_title_es") or plan.get("title_es"))
     except Exception as e:
         print(f"[CUSTOM] ⚠️ No se pudo agregar intro: {e}")
+
+    # Exporta SOLO videos largos a la carpeta raíz `videos/`.
+    try:
+        _export_long_videos_to_videos_dir(
+            plan=plan,
+            carpeta_plan=carpeta,
+            video_final=video_final,
+            video_con_intro=None,
+        )
+    except Exception:
+        pass
 
     print("[CUSTOM] ✅ Video personalizado generado")
     return True
@@ -3456,19 +3703,57 @@ def renderizar_video_personalizado_desde_plan(
     except Exception as e:
         print(f"[CUSTOM] ⚠️ No se pudo agregar intro: {e}")
 
+    # Exporta SOLO videos largos a la carpeta raíz `videos/`.
+    export_video: str | None = None
+    export_info: Dict[str, Any] = {}
+    try:
+        export_video, export_info = _export_long_videos_to_videos_dir(
+            plan=plan,
+            carpeta_plan=carpeta_plan,
+            video_final=video_final,
+            video_con_intro=video_con_intro,
+        )
+    except Exception:
+        export_video, export_info = (video_con_intro or video_final), {}
+
     try:
         import time as _time
 
         plan["render_done"] = True
         plan["render_done_at"] = _time.strftime("%Y-%m-%d %H:%M:%S")
+        def _rel_if_exists(p: str | None) -> str | None:
+            if not p:
+                return None
+            try:
+                if not os.path.exists(p):
+                    return None
+            except Exception:
+                return None
+            try:
+                return os.path.relpath(p, carpeta_plan).replace("\\", "/")
+            except Exception:
+                return None
+
         plan["render_outputs"] = {
-            "video_final": os.path.relpath(video_final, carpeta_plan).replace("\\", "/") if video_final else None,
-            "video_con_intro": os.path.relpath(video_con_intro, carpeta_plan).replace("\\", "/") if video_con_intro else None,
+            # Estas rutas son relativas al plan SOLO si los archivos siguen ahí (en largos se mueven).
+            "video_final": _rel_if_exists(video_final),
+            "video_con_intro": _rel_if_exists(video_con_intro),
+            # Export para largos (ruta relativa al cwd/proyecto).
+            "export": export_info or None,
+            "export_video": None,
         }
+
+        try:
+            if export_video and os.path.exists(export_video):
+                plan["render_outputs"]["export_video"] = os.path.relpath(export_video, os.path.abspath(".")).replace("\\", "/")
+        except Exception:
+            pass
         with open(plan_file, "w", encoding="utf-8") as f:
             json.dump(plan, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
+    if export_info and export_info.get("export_video"):
+        print(f"[CUSTOM] ✅ Exportado (largo) a: {export_info.get('export_video')}")
     print("[CUSTOM] ✅ Video personalizado re-renderizado")
     return True

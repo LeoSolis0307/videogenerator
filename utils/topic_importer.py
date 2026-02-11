@@ -81,9 +81,52 @@ def _extract_prompts_anywhere(text: str) -> list[str]:
     return out
 
 
+def _extract_topics_anywhere(text: str) -> list[str]:
+    raw = (text or "").strip()
+    if not raw:
+        return []
+
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+    topics: list[str] = []
+
+    # Markdown bold numbered items: **1. Title**
+    for m in re.finditer(r"(?m)^\s*\*\*\s*\d+\s*\.\s*(.+?)\s*\*\*\s*$", raw):
+        topics.append(m.group(1))
+
+    # Plain numbered items: 1. Title
+    # Avoid matching lines that are blockquotes or headings.
+    for m in re.finditer(r"(?m)^\s*(?![>#])\d+\s*\.\s*(.+?)\s*$", raw):
+        topics.append(m.group(1))
+
+    # Blockquotes that include a quoted topic/prompt. We keep the full quoted sentence(s)
+    # because the topics file is free-form text.
+    for m in re.finditer(r"(?m)^\s*>\s*\"([^\"]{10,})\"\s*$", raw):
+        topics.append(m.group(1))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in topics:
+        s = _clean_prompt_line(t)
+        if not s:
+            continue
+        # Remove trailing punctuation from titles like "...**" or stray colons/spaces.
+        s = s.strip().strip("-").strip()
+        norm = topic_db.normalize_text(re.sub(r"[`\"']", "", s))
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(s)
+
+    return out
+
+
 def parse_prompts_from_blob(text: str) -> list[str]:
 
-    return _extract_prompts_anywhere(text)
+    prompts = _extract_prompts_anywhere(text)
+    if prompts:
+        return prompts
+    return _extract_topics_anywhere(text)
 
 
 def dedupe_prompts(

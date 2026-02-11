@@ -22,7 +22,11 @@ COMFY_TIMEOUT = int(os.environ.get("COMFYUI_TIMEOUT", "800"))
                                                                     
 OLLAMA_URL = (os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate") or "http://localhost:11434/api/generate").strip()
                                                              
-OLLAMA_TEXT_MODEL = (os.environ.get("OLLAMA_TEXT_MODEL") or "gemma2:9b").strip() or "gemma2:9b"
+OLLAMA_TEXT_MODEL = (
+    os.environ.get("OLLAMA_TEXT_MODEL")
+    or os.environ.get("OLLAMA_MODEL")
+    or "gemma2:9b"
+).strip() or "gemma2:9b"
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "90") or "90")
                                                                             
 OLLAMA_TEXT_NUM_CTX_DEFAULT = int((os.environ.get("OLLAMA_TEXT_NUM_CTX") or os.environ.get("OLLAMA_NUM_CTX") or "2048").strip() or "2048")

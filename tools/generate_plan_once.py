@@ -34,7 +34,9 @@ def main() -> None:
     plan = custom_video.generar_plan_personalizado(brief, min_seconds=target_seconds)
 
     out_path = out_dir / 'custom_plan.json'
-    out_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding='utf-8')
+    # Convert Pydantic object to dict for serialization
+    data = plan.model_dump() if hasattr(plan, "model_dump") else plan.dict()
+    out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
     print('[TOOLS] Saved:', out_path)
 
 

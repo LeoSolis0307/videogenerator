@@ -187,7 +187,11 @@ def _call_ollama(prompt: str, *, max_tokens: int = 800, temperature: float = 0.8
     url = (_get_env(OLLAMA_URL_ENV, OLLAMA_URL_DEFAULT) or OLLAMA_URL_DEFAULT).strip()
                                                                                                  
                                                                            
-    model = (_get_env("OLLAMA_TEXT_MODEL") or "llama3.1:latest").strip() or "llama3.1:latest"
+    model = (
+        _get_env("OLLAMA_TEXT_MODEL")
+        or _get_env(OLLAMA_MODEL_ENV)
+        or "llama3.1:latest"
+    ).strip() or "llama3.1:latest"
     timeout_s = int((_get_env(OLLAMA_TIMEOUT_ENV, "180") or "180").strip() or "180")
     print(f"[GPT] Usando Ollama modelo: {model} @ {url} (timeout {timeout_s}s)")
     def _default_num_ctx() -> int:
