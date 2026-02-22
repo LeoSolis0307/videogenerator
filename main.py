@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import sys
 import time
 
 from core import custom_video, image_downloader, reddit_scraper, story_generator, text_processor, tts
@@ -25,8 +26,18 @@ from utils import topic_importer
 
 from core.config import settings
 
+
+def _configure_console_encoding() -> None:
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # Constantes locales (podrían moverse a config si se desea)
-VOZ = "es-MX-JorgeNeural"
+VOZ = (settings.custom_voice or os.environ.get("CUSTOM_VOICE") or "es-MX-JorgeNeural").strip()
 VELOCIDAD = "-10%"
 
 HISTORIAS_BASE = "historias"
@@ -46,6 +57,40 @@ def _pedir_entero(mensaje: str, *, minimo: int = 1, default: int = 1) -> int:
         return val
     except Exception:
         return default
+
+
+def _pedir_texto_multiline(etiqueta: str, *, max_empty_attempts: int = 3) -> str | None:
+    print(etiqueta)
+    print("[MAIN] Pega tu texto. Para terminar escribe 'fin' en una línea sola.")
+    lineas: list[str] = []
+    empty_attempts = 0
+    while True:
+        try:
+            ln = input()
+        except EOFError:
+            if not lineas:
+                return None
+            break
+        lns = ln.strip()
+        if lns.lower() == "fin":
+            break
+
+        if not lns:
+            if lineas:
+                lineas.append("")
+                continue
+            empty_attempts += 1
+            if empty_attempts >= max(1, int(max_empty_attempts)):
+                print("[MAIN] ❌ Demasiados intentos vacíos. Abortando captura del prompt.")
+                return None
+            print(f"[MAIN] ⚠️ El prompt no puede estar vacío. Intento {empty_attempts}/{max_empty_attempts}.")
+            continue
+        empty_attempts = 0
+        lineas.append(ln.rstrip())
+    texto = "\n".join(lineas).rstrip()
+    if not texto.strip():
+        return None
+    return texto
 
 
 def _parse_indices_csv(raw: str, *, max_index: int) -> list[int]:
@@ -298,6 +343,25 @@ def _custom_plans_pendientes() -> list[str]:
 
     pendientes.sort(key=lambda p: os.path.getmtime(p), reverse=True)
     return pendientes
+
+
+def _custom_plans_todos() -> list[str]:
+    planes: list[str] = []
+    base = os.path.abspath("output")
+    if not os.path.isdir(base):
+        return planes
+    for entry in os.scandir(base):
+        if not entry.is_dir():
+            continue
+        name = entry.name
+        if name.startswith("0"):
+            continue
+        plan_file = os.path.join(entry.path, "custom_plan.json")
+        if os.path.exists(plan_file):
+            planes.append(entry.path)
+
+    planes.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return planes
 
 
 def _custom_plan_flags(ruta: str) -> dict:
@@ -643,6 +707,7 @@ def _generar_video(usar_video_base: bool, indice: int, total: int, *, usar_histo
 
 
 if __name__ == "__main__":
+    _configure_console_encoding()
     print("[MAIN] Iniciando proceso")
 
                                                                              
@@ -797,8 +862,14 @@ if __name__ == "__main__":
         else:
             total_custom = _pedir_entero("¿Cuántos videos personalizados quieres crear?: ", minimo=1, default=1)
 
-        dur_opt = input("Duración mínima para TODOS (1=1 minuto, 2=5 minutos) [1]: ").strip()
-        min_seconds = 60 if dur_opt != "2" else 300
+        dur_opt = input("Duración mínima para TODOS (1=1 minuto, 2=5 minutos, 3=debug 5 segundos) [1]: ").strip()
+        if dur_opt == "2":
+            min_seconds = 300
+        elif dur_opt == "3":
+            min_seconds = 5
+            print("[MAIN] 🧪 Modo debug rápido activado: objetivo ~5 segundos para validar pipeline.")
+        else:
+            min_seconds = 60
 
         sel_all = input("¿Quieres elegir manualmente las imágenes para TODOS los videos? (s/N): ").strip().lower()
         seleccionar_imagenes_all = sel_all == "s"
@@ -861,7 +932,10 @@ if __name__ == "__main__":
             print("[MAIN] Ingresa los prompts de cada historia (luego comenzará el render).")
             for i in range(1, total_custom + 1):
                 while True:
-                    brief = input(f"Prompt/Tema para la historia {i}/{total_custom}: ").strip()
+                    brief = _pedir_texto_multiline(f"Prompt/Tema para la historia {i}/{total_custom}:")
+                    if brief is None:
+                        print("[MAIN] ❌ Entrada finalizada (EOF) antes de capturar el prompt. Abortando para evitar bucle.")
+                        raise SystemExit(1)
                     if not brief:
                         print("[MAIN] ⚠️ El prompt no puede estar vacío.")
                         continue
@@ -879,18 +953,21 @@ if __name__ == "__main__":
         print("\n[MAIN] Fase 1: generando SOLO guiones/planes (sin imágenes, sin render)...")
 
                                                                                  
-        try:
-            if not custom_video.check_text_llm_ready():
-                print("[MAIN] ❌ Abortando Fase 1: el LLM de texto no está disponible en Ollama.")
-                print("[MAIN] 💡 Tip (Gemma 2): instala uno más liviano y úsalo para guiones:")
-                print("[MAIN]   - `ollama pull gemma2:2b`  (recomendado para PCs con poca RAM)")
-                print("[MAIN]   - `setx OLLAMA_TEXT_MODEL gemma2:2b`  (abre una nueva terminal luego)")
+        if min_seconds <= 10:
+            print("[MAIN] ℹ️ Modo debug 5s: se omite preflight del LLM de texto.")
+        else:
+            try:
+                if not custom_video.check_text_llm_ready():
+                    print("[MAIN] ❌ Abortando Fase 1: el LLM de texto no está disponible en Ollama.")
+                    print("[MAIN] 💡 Tip (Gemma 2): instala uno más liviano y úsalo para guiones:")
+                    print("[MAIN]   - `ollama pull gemma2:2b`  (recomendado para PCs con poca RAM)")
+                    print("[MAIN]   - `setx OLLAMA_TEXT_MODEL gemma2:2b`  (abre una nueva terminal luego)")
+                    raise SystemExit(1)
+            except SystemExit:
+                raise
+            except Exception as e:
+                print(f"[MAIN] ❌ Abortando Fase 1: fallo el preflight de Ollama: {e}")
                 raise SystemExit(1)
-        except SystemExit:
-            raise
-        except Exception as e:
-            print(f"[MAIN] ❌ Abortando Fase 1: fallo el preflight de Ollama: {e}")
-            raise SystemExit(1)
 
         creados = 0
         planes_creados: list[str] = []
@@ -978,8 +1055,15 @@ if __name__ == "__main__":
 
     if accion == "5":
         planes = _custom_plans_pendientes()
+        mostrando_todos = False
+        if not planes:
+            planes = _custom_plans_todos()
+            mostrando_todos = bool(planes)
         if planes:
-            print("\n[MAIN] Planes personalizados disponibles:")
+            if mostrando_todos:
+                print("\n[MAIN] No hay pendientes; mostrando todos los planes personalizados:")
+            else:
+                print("\n[MAIN] Planes personalizados disponibles:")
             for i, p in enumerate(planes, start=1):
                 print(f"  {i}. {p}")
 
@@ -1036,7 +1120,7 @@ if __name__ == "__main__":
         else:
             raw = input("Rutas (separadas por coma) de carpeta output/custom_... o custom_plan.json: ").strip().strip('"')
             if not raw:
-                print("[MAIN] No se indicó ruta")
+                print("[MAIN] No se encontraron planes custom y no se indicó ruta")
                 raise SystemExit(0)
 
             rutas = [r.strip().strip('"') for r in raw.split(",") if r.strip().strip('"')]
@@ -1052,7 +1136,9 @@ if __name__ == "__main__":
                     )
                     if ok:
                         exitos += 1
-                        _finalizar_tema_custom_renderizado(ruta)
+                        ruta_plan = os.path.abspath(ruta)
+                        plan_dir = ruta_plan if os.path.isdir(ruta_plan) else os.path.dirname(ruta_plan)
+                        _finalizar_tema_custom_renderizado(plan_dir)
                     print(f"[MAIN] Render {i}/{total_renders}:", "✅ Exito" if ok else "❌ Falló")
                 except Exception as e:
                     print(f"[MAIN] ⚠️ Error renderizando ({ruta}): {e}")

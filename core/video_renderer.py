@@ -10,7 +10,9 @@ import shutil
 import imageio_ffmpeg
 from core.config import settings
 
-DEFAULT_INTRO_PATH = r"C:\Users\Leonardo\Downloads\video\intro.mp4"
+_LEGACY_DEFAULT_INTRO_PATH = r"C:\Users\Leonardo\Downloads\video\intro.mp4"
+_LOCAL_DEFAULT_INTRO_PATH = os.path.abspath(os.path.join(os.getcwd(), "intro.mp4"))
+DEFAULT_INTRO_PATH = _LOCAL_DEFAULT_INTRO_PATH if os.path.exists(_LOCAL_DEFAULT_INTRO_PATH) else _LEGACY_DEFAULT_INTRO_PATH
 MIN_VIDEO_SEC = 15 * 60
 MAX_VIDEO_SEC = 30 * 60
 DEFAULT_VIDEOS_DIR = r"C:\Users\Leonardo\Downloads\video\media"
@@ -23,6 +25,12 @@ SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
 
 
 def _encoding_cfg() -> dict:
+    def _opt_str(value) -> str:
+        text = str(value).strip() if value is not None else ""
+        if text.lower() in {"", "none", "null"}:
+            return ""
+        return text
+
     quality = (settings.video_quality or "").strip().lower()
 
     preset = settings.video_preset
@@ -53,12 +61,12 @@ def _encoding_cfg() -> dict:
 
     return {
         "quality": quality,
-        "preset": str(preset).strip() or "veryfast",
-        "crf": str(crf).strip() or "20",
-        "fps": str(fps).strip() or "25",
-        "audio_bitrate": str(audio_bitrate).strip(),
-        "scale_flags": str(scale_flags).strip(),
-        "tune": str(tune).strip(),
+        "preset": _opt_str(preset) or "veryfast",
+        "crf": _opt_str(crf) or "20",
+        "fps": _opt_str(fps) or "25",
+        "audio_bitrate": _opt_str(audio_bitrate),
+        "scale_flags": _opt_str(scale_flags),
+        "tune": _opt_str(tune),
     }
 
 
@@ -802,6 +810,11 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
 
     cfg = _encoding_cfg()
     fps = cfg["fps"]
+    try:
+        XF_MS = max(0, int(settings.video_crossfade_ms))
+    except Exception:
+        XF_MS = 250
+    ENABLE_LOUDNORM = bool(settings.enable_loudnorm)
 
                                                     
                                                                                     

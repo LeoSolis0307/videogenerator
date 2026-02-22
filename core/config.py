@@ -50,9 +50,10 @@ class Settings(BaseSettings):
     custom_hook_segments: int = Field(default=2, validation_alias="CUSTOM_HOOK_SEGMENTS")
     custom_hook_extra_candidates: int = Field(default=10, validation_alias="CUSTOM_HOOK_EXTRA_CANDIDATES")
     custom_hook_min_img_score: int = Field(default=3, validation_alias="CUSTOM_HOOK_MIN_IMG_SCORE")
+    custom_voice: str = Field(default="es-MX-JorgeNeural", validation_alias="CUSTOM_VOICE")
     
     # Image Sources & Network
-    img_sources: str = Field(default="ddg,openverse,wikimedia", validation_alias="IMG_SOURCES")
+    img_sources: str = Field(default="ddg,openverse,wikimedia,sites", validation_alias="IMG_SOURCES")
     ddg_images_backend: str = Field(default="lite", validation_alias="DDG_IMAGES_BACKEND")
     ddg_search_timeout_sec: float = Field(default=25.0, validation_alias="DDG_SEARCH_TIMEOUT_SEC")
     openverse_timeout_sec: float = Field(default=20.0, validation_alias="OPENVERSE_TIMEOUT_SEC")

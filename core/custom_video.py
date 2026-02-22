@@ -6,6 +6,7 @@ import re
 import sys
 import subprocess
 import concurrent.futures
+import requests
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote_plus
@@ -21,14 +22,23 @@ from core.llm.client import llm_client
 from core.models import VideoPlan, ScriptSegment, TimelineItem
 from utils.fs import crear_carpeta_proyecto
 from core import tts, image_downloader, text_processor, reddit_scraper, story_generator
+from core.video_renderer import (
+    append_intro_to_video,
+    audio_duration_seconds,
+    combine_audios_with_silence,
+    render_video_ffmpeg,
+)
 
 try:
     from ddgs import DDGS as DDGS
+    _DDG_BACKEND = "ddgs"
 except Exception:
     try:
         from duckduckgo_search import DDGS as DDGS
+        _DDG_BACKEND = "duckduckgo_search"
     except Exception:
         DDGS = None
+        _DDG_BACKEND = "none"
 
 # Configuración migrada a core/config.py (settings)
 
@@ -48,6 +58,20 @@ USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/121.0.0.0 Safari/537.36"
 )
+
+_SITE_IMAGE_SOURCES: dict[str, str] = {
+    "cleanpng": "cleanpng.com",
+    "stickpng": "stickpng.com",
+    "freepngimg": "freepngimg.com",
+    "toppng": "toppng.com",
+    "similarpng": "similarpng.com",
+    "flaticon": "flaticon.com",
+    "pixabay": "pixabay.com",
+    "pexels": "pexels.com",
+    "unsplash": "unsplash.com",
+}
+
+_VISION_AVAILABLE = None
 
 
 
@@ -482,6 +506,23 @@ def _extract_tone_from_brief(brief: str) -> str:
     return tone
 
 
+def _requires_curious_final(brief: str, tone_hint: str = "") -> bool:
+    txt = ((brief or "") + " " + (tone_hint or "")).lower()
+    if not txt.strip():
+        return False
+    triggers = [
+        "dato curioso",
+        "datos curiosos",
+        "curiosidad",
+        "curiosidades",
+        "fun fact",
+        "did you know",
+        "sabías que",
+        "sabias que",
+    ]
+    return any(t in txt for t in triggers)
+
+
 def _tiene_saludo_o_outro(texto: str) -> bool:
     t = (texto or "").strip().lower()
     if not t:
@@ -607,18 +648,19 @@ def _plan_quality_issues(segmentos: List[Dict[str, Any]], *, target_seconds: int
         issues.append("intro_repetida")
 
                                                                             
-    def _has_final_marker(t: str) -> bool:
-        tl = t.lower()
-        return ("dato curioso final" in tl) or ("¿sabías que" in tl) or ("sabias que" in tl) or ("sabías que" in tl)
+    if _requires_curious_final(" ".join(texts)):
+        def _has_final_marker(t: str) -> bool:
+            tl = t.lower()
+            return ("dato curioso final" in tl) or ("¿sabías que" in tl) or ("sabias que" in tl) or ("sabías que" in tl)
 
-    final_markers = [i for i, t in enumerate(lowered) if _has_final_marker(t)]
-    if not final_markers:
-        issues.append("sin_dato_curioso_final")
-    else:
-        if len(final_markers) != 1:
-            issues.append("multiples_datos_curiosos_finales")
-        if final_markers and final_markers[-1] != len(segmentos) - 1:
-            issues.append("dato_curioso_no_es_ultimo")
+        final_markers = [i for i, t in enumerate(lowered) if _has_final_marker(t)]
+        if not final_markers:
+            issues.append("sin_dato_curioso_final")
+        else:
+            if len(final_markers) != 1:
+                issues.append("multiples_datos_curiosos_finales")
+            if final_markers and final_markers[-1] != len(segmentos) - 1:
+                issues.append("dato_curioso_no_es_ultimo")
 
                                
     if len(set(texts)) != len(texts):
@@ -729,6 +771,40 @@ def _target_word_range(min_seconds: int) -> tuple[int, int]:
     sec = max(30, int(min_seconds))
     base = int(140 * (sec / 60.0))
     return max(90, int(base * 0.95)), max(120, int(base * 1.35))
+
+
+def _build_debug_quick_plan(brief: str, *, target_seconds: int) -> VideoPlan:
+    sec = max(3, int(target_seconds or 5))
+    brief_clean = re.sub(r"\s+", " ", (brief or "").strip())
+    seed = brief_clean[:120] if brief_clean else "prueba de render"
+    title = f"Debug rápido {sec}s"
+    hook = "Prueba rápida de pipeline completo"
+    text_es = f"Prueba rápida: {seed}. Render de diagnóstico completado."
+    image_query = "dramatic portrait close up"
+    image_prompt = "close-up portrait, cinematic light, realistic"
+    note = "Prueba debug: validar generación rápida de plan, TTS, imagen y render."
+
+    segmentos = [{
+        "text_es": text_es,
+        "image_query": image_query,
+        "image_prompt": image_prompt,
+        "note": note,
+    }]
+    timeline = [{"prompt": image_prompt, "start": 0.0, "end": float(sec)}]
+
+    return VideoPlan(
+        brief=brief,
+        target_seconds=sec,
+        title_es=title,
+        youtube_title_es=title,
+        hook_es=hook,
+        script_es=text_es,
+        segments=[ScriptSegment(**s) for s in segmentos],
+        prompts=[image_prompt],
+        timeline=[TimelineItem(**t) for t in timeline],
+        contexto_web="",
+        raw_plan={"debug_mode": True, "debug_target_seconds": sec},
+    )
 
 
 def _segmentar_texto_en_prompts(historia: str, prompts: List[str]) -> List[str]:
@@ -1310,6 +1386,128 @@ def _crear_placeholder_imagen(carpeta: str, seg_tag: str) -> str | None:
     return None
 
 
+def _es_placeholder_generado(path: str) -> bool:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as im:
+            rgb = im.convert("RGB")
+            ex = rgb.getextrema()
+        if not ex or len(ex) != 3:
+            return False
+        return all(lo == hi and lo <= 24 for (lo, hi) in ex)
+    except Exception:
+        return False
+
+
+def _recuperar_candidato_local(carpeta: str, seg_tag: str) -> str | None:
+    cand_paths: list[str] = []
+    try:
+        cand_dir = os.path.join(carpeta, "candidates")
+        if os.path.isdir(cand_dir):
+            for n in sorted(os.listdir(cand_dir)):
+                nlow = n.lower()
+                if not n.startswith(f"{seg_tag}_"):
+                    continue
+                if not nlow.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+                    continue
+                cand_paths.append(os.path.join(cand_dir, n))
+    except Exception:
+        pass
+
+    try:
+        for n in sorted(os.listdir(carpeta)):
+            if not n.startswith(f"{seg_tag}_cand_"):
+                continue
+            cand_paths.append(os.path.join(carpeta, n))
+    except Exception:
+        pass
+
+    for absp in cand_paths:
+        if not _es_imagen_valida(absp):
+            continue
+        if _es_placeholder_generado(absp):
+            continue
+        ext = os.path.splitext(absp)[1].lower() or ".jpg"
+        stable = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
+        try:
+            with open(absp, "rb") as src, open(stable, "wb") as dst:
+                dst.write(src.read())
+            return stable
+        except Exception:
+            return absp
+    return None
+
+
+def _reusar_chosen_existente(carpeta: str, seg_tag_destino: str) -> str | None:
+    try:
+        candidatos: list[str] = []
+        for n in sorted(os.listdir(carpeta)):
+            nlow = n.lower()
+            if not n.startswith("seg_"):
+                continue
+            if "_chosen" not in n:
+                continue
+            if not nlow.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+                continue
+            p = os.path.join(carpeta, n)
+            if not _es_imagen_valida(p):
+                continue
+            if _es_placeholder_generado(p):
+                continue
+            candidatos.append(p)
+
+        if not candidatos:
+            return None
+
+        src = candidatos[0]
+        ext = os.path.splitext(src)[1].lower() or ".jpg"
+        dst = os.path.join(carpeta, f"{seg_tag_destino}_chosen{ext}")
+        with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+            fdst.write(fsrc.read())
+        return dst
+    except Exception:
+        return None
+
+
+def _limpiar_chosen_obsoletos(carpeta: str) -> int:
+    try:
+        names = sorted(os.listdir(carpeta))
+    except Exception:
+        return 0
+
+    per_seg: dict[str, list[str]] = {}
+    for n in names:
+        low = n.lower()
+        if not low.startswith("seg_"):
+            continue
+        if "_chosen" not in low:
+            continue
+        if not low.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+            continue
+        seg = n.split("_chosen", 1)[0]
+        per_seg.setdefault(seg, []).append(os.path.join(carpeta, n))
+
+    removed = 0
+    for _, paths in per_seg.items():
+        non_placeholder = [p for p in paths if _es_imagen_valida(p) and not _es_placeholder_generado(p)]
+        if not non_placeholder:
+            continue
+        for p in paths:
+            if p in non_placeholder:
+                continue
+            if not _es_imagen_valida(p):
+                continue
+            if not _es_placeholder_generado(p):
+                continue
+            try:
+                os.remove(p)
+                removed += 1
+            except Exception:
+                pass
+    return removed
+
+
 def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
     if not DDGS:
         return []
@@ -1483,6 +1681,27 @@ def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[st
             seen.add(u)
             out.append((u, t, src))
 
+    def _buscar_en_sitios(keys: list[str]) -> list[Tuple[str, str, str]]:
+        out_sites: list[Tuple[str, str, str]] = []
+        seen_sites: set[str] = set()
+        if not keys:
+            keys = list(_SITE_IMAGE_SOURCES.keys())
+        per_site_max = 2 if int(max_results) > 3 else 1
+        for k in keys:
+            dom = _SITE_IMAGE_SOURCES.get(k)
+            if not dom:
+                continue
+            q_site = f"site:{dom} {query}"
+            res = _buscar_ddg_imagenes(q_site, max_results=per_site_max)
+            for u, t in res:
+                if u in seen_sites:
+                    continue
+                seen_sites.add(u)
+                out_sites.append((u, t, k))
+                if len(out_sites) >= int(max_results):
+                    return out_sites
+        return out_sites
+
     for src in sources:
         if len(out) >= int(max_results):
             break
@@ -1492,6 +1711,12 @@ def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[st
             _add(_buscar_wikimedia_imagenes(query, max_results=max_results), "wikimedia")
         elif src in {"openverse", "ov"}:
             _add(_buscar_openverse_imagenes(query, max_results=max_results), "openverse")
+        elif src in {"sites", "pngsites", "stocksites"}:
+            for u, t, sname in _buscar_en_sitios(list(_SITE_IMAGE_SOURCES.keys())):
+                _add([(u, t)], sname)
+        elif src in _SITE_IMAGE_SOURCES:
+            for u, t, sname in _buscar_en_sitios([src]):
+                _add([(u, t)], sname)
         else:
             continue
 
@@ -2318,6 +2543,7 @@ def _prompt_plan(
     max_prompts: int = 12,
     hook_hint: str = "",
     tone_hint: str = "",
+    require_curious_final: bool = False,
 ) -> str:
     contexto_line = contexto if contexto else "Sin contexto web disponible, apóyate en conocimiento general y datos comprobables."
     target_seconds = int(max(15, target_seconds))
@@ -2466,7 +2692,12 @@ def _prompt_plan(
             "  }.\n"
             "- script_es: concatenación de todos los text_es en orden.\n"
             f"Verificación interna: script_es debe durar ~{target_seconds} segundos (~{target_minutes} min) y tener aprox {wmin_doc}-{wmax_doc} palabras.\n"
-            "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' exactamente una vez y además cerrar el círculo narrativo.\n"
+            + (
+                "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' exactamente una vez y además cerrar el círculo narrativo.\n"
+                if require_curious_final
+                else "Cierre obligatorio: el último segmento debe cerrar el círculo narrativo con un dato concreto y memorable.\n"
+            )
+            +
             "NO agregues comentarios adicionales, SOLO el objeto JSON válido."
         )
 
@@ -2488,12 +2719,22 @@ def _prompt_plan(
         "ESTRUCTURA OBLIGATORIA (en este orden):\n"
         "1) Introducción: presenta el tema elegido de forma concreta (qué es y por qué importa).\n"
         "2) Datos curiosos: entrega datos específicos, ejemplos, mini-historia o contexto; evita generalidades.\n"
-        "3) Cierre: termina con un DATO CURIOSO FINAL memorable (incluye 'Dato curioso final:' o '¿Sabías que...?').\n"
+        + (
+            "3) Cierre: termina con un DATO CURIOSO FINAL memorable (incluye 'Dato curioso final:' o '¿Sabías que...?').\n"
+            if require_curious_final
+            else "3) Cierre: termina con un dato final concreto y memorable, sin muletillas genéricas.\n"
+        )
+        +
         "PROHIBIDO: terminar con frases vagas tipo 'en este video exploramos el mundo mágico' sin dar un dato final.\n\n"
         "Evita repeticiones: cero saludos; cero muletillas tipo 'hoy exploraremos'/'en este video'. Cada segmento debe aportar un dato nuevo.\n"
         "Evita redundancia: no repitas el mismo ejemplo/dato en más de un segmento. No rellenes con frases vacías. No repitas la misma pregunta retórica en varios segmentos.\n"
         "Hook único: hook_es debe ser UNA sola frase corta, no un array.\n"
-        "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' una sola vez.\n\n"
+        + (
+            "Cierre obligatorio: el último segmento debe incluir 'Dato curioso final:' o '¿Sabías que...?' una sola vez.\n\n"
+            if require_curious_final
+            else "Cierre obligatorio: el último segmento debe cerrar con una conclusión concreta y sin fórmulas repetitivas.\n\n"
+        )
+        +
         "FORMATO DE RESPUESTA OBLIGATORIO:\n"
         "- Responde SOLO con un objeto JSON válido, sin texto adicional antes o después.\n"
         "- NO uses bloques de código markdown (```json o ```).\n"
@@ -2529,7 +2770,12 @@ def _prompt_expand_to_min_duration(brief: str, contexto: str, plan_raw: Dict[str
         f"DATOS RAPIDOS: {contexto_line}\n"
         f"DURACION MINIMA: {min_seconds} segundos (>= {max(5, min_seconds//60)} minutos).\n"
         f"PLAN ACTUAL (puede estar incompleto): {raw_str}\n\n"
-        "ESTRUCTURA OBLIGATORIA: intro concreta → datos curiosos específicos → cierre con DATO CURIOSO FINAL (incluye 'Dato curioso final:' o '¿Sabías que...?').\n"
+        + (
+            "ESTRUCTURA OBLIGATORIA: intro concreta → datos curiosos específicos → cierre con DATO CURIOSO FINAL (incluye 'Dato curioso final:' o '¿Sabías que...?').\n"
+            if _requires_curious_final(brief)
+            else "ESTRUCTURA OBLIGATORIA: intro concreta → datos específicos → cierre con dato final concreto y memorable.\n"
+        )
+        +
         "Entrega SOLO JSON con las mismas claves: title_es, hook_es, segments (12-24), script_es. "
         "Cada segment.text_es 80-140 palabras. "
         f"script_es total ~{wmin}-{wmax} palabras. "
@@ -2544,11 +2790,18 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
                                                                
     target_seconds = int(min_seconds or settings.custom_min_video_sec)
-    if target_seconds not in (60, 300):
+    if target_seconds <= 10:
+        target_seconds = max(3, target_seconds)
+    elif target_seconds not in (60, 300):
         target_seconds = max(60, target_seconds)
+
+    if target_seconds <= 10:
+        return _build_debug_quick_plan(brief_in, target_seconds=target_seconds)
+
     brief = _sanitize_brief_for_duration(brief_in) or brief_in
     hook_hint = _extract_hook_from_brief(brief_in)
     tone_hint = _extract_tone_from_brief(brief_in)
+    require_curious_final = _requires_curious_final(brief_in, tone_hint)
 
     # Modo documental (chunking por capítulos) para 5-20 minutos.
     # Se puede desactivar con env CUSTOM_LONG_CHUNKING=0.
@@ -2657,7 +2910,11 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
         last_rules = (
             "- Este es el ÚLTIMO capítulo: responde explícitamente la GRAN PREGUNTA y cierra el círculo narrativo volviendo al inicio.\n"
-            "- El ÚLTIMO segmento debe incluir exactamente una vez 'Dato curioso final:' o '¿Sabías que...?' con el dato completo en la misma oración.\n"
+            + (
+                "- El ÚLTIMO segmento debe incluir exactamente una vez 'Dato curioso final:' o '¿Sabías que...?' con el dato completo en la misma oración.\n"
+                if require_curious_final
+                else "- El ÚLTIMO segmento debe cerrar con una conclusión concreta y memorable (sin frases plantilla).\n"
+            )
         ) if is_last_chapter else (
             "- NO cierres el video aquí: no hagas conclusión final ni despedidas. Deja un puente al siguiente capítulo.\n"
         )
@@ -2893,6 +3150,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 max_prompts=max_prompts,
                 hook_hint=hook_hint,
                 tone_hint=tone_hint,
+                require_curious_final=require_curious_final,
             )
             plan = _ollama_generate_json_with_timeout(
                 prompt,
@@ -3082,7 +3340,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
                                                                                
     try:
-        if segmentos and not _es_cierre_valido(str(segmentos[-1].get("text_es") or "")):
+        if require_curious_final and segmentos and not _es_cierre_valido(str(segmentos[-1].get("text_es") or "")):
             for attempt in range(2):
                 cierre_prompt = _prompt_rewrite_closing_segment(brief, contexto, segmentos[-1], target_seconds=target_seconds)
                 cierre_obj = _ollama_generate_json_with_timeout(
@@ -3254,11 +3512,15 @@ def generar_video_personalizado(
     except Exception:
         pass
 
+    debug_min_seconds = int(plan.get("target_seconds") or 0)
+    if not (0 < debug_min_seconds <= 10):
+        debug_min_seconds = None
+
     audio_final = combine_audios_with_silence(
         audios,
         carpeta,
         gap_seconds=0,
-        min_seconds=None,
+        min_seconds=debug_min_seconds,
         max_seconds=None,
     )
 
@@ -3291,10 +3553,18 @@ def renderizar_video_personalizado_desde_plan(
     velocidad: str,
     interactive: bool = True,
 ) -> bool:
-    carpeta_plan = os.path.abspath(carpeta_plan)
-    plan_file = carpeta_plan
-    if os.path.isdir(plan_file):
+    input_path = os.path.abspath(carpeta_plan)
+    if os.path.isdir(input_path):
+        carpeta_plan = input_path
         plan_file = os.path.join(carpeta_plan, "custom_plan.json")
+    else:
+        plan_file = input_path
+        carpeta_plan = os.path.dirname(plan_file) or os.getcwd()
+
+    if not os.path.isdir(carpeta_plan):
+        print(f"[CUSTOM] ❌ Carpeta inválida: {carpeta_plan}")
+        return False
+
     if not os.path.exists(plan_file):
         print(f"[CUSTOM] ❌ No existe: {plan_file}")
         return False
@@ -3311,6 +3581,54 @@ def renderizar_video_personalizado_desde_plan(
         print("[CUSTOM] ❌ Plan sin segmentos")
         return False
 
+    plan_changed = False
+    for i, seg in enumerate(segmentos, start=1):
+        if not isinstance(seg, dict):
+            continue
+        seg_tag = f"seg_{i:02d}"
+        img_sel = seg.get("image_selection") if isinstance(seg.get("image_selection"), dict) else {}
+        sel = img_sel.get("selected") if isinstance(img_sel, dict) else None
+        rel = (sel or {}).get("path") if isinstance(sel, dict) else None
+        abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep)) if rel else ""
+        sel_title = str((sel or {}).get("title") or "").strip().lower() if isinstance(sel, dict) else ""
+        sel_fallback = str((img_sel or {}).get("fallback") or "").strip().lower() if isinstance(img_sel, dict) else ""
+        is_placeholder = ("placeholder" in sel_title) or (sel_fallback == "placeholder") or _es_placeholder_generado(abs_path)
+        if rel and _es_imagen_valida(abs_path) and not is_placeholder:
+            continue
+
+        rec = _recuperar_candidato_local(carpeta_plan, seg_tag)
+        if not rec:
+            continue
+        rel_rec = os.path.relpath(rec, carpeta_plan).replace("\\", "/")
+        seg["image_selection"] = {
+            "query": str(seg.get("image_query") or seg.get("image_prompt") or "").strip(),
+            "note": str(seg.get("note") or "").strip(),
+            "candidates": img_sel.get("candidates") if isinstance(img_sel, dict) else [],
+            "selected": {
+                "candidate_index": None,
+                "score": 1,
+                "url": None,
+                "title": "recovered_local_candidate",
+                "path": rel_rec,
+            },
+        }
+        plan_changed = True
+
+    if plan_changed:
+        plan["segments"] = segmentos
+        try:
+            with open(plan_file, "w", encoding="utf-8") as f:
+                json.dump(plan, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    try:
+        removed = _limpiar_chosen_obsoletos(carpeta_plan)
+        if removed > 0:
+            print(f"[CUSTOM] ℹ️ Limpieza: eliminados {removed} chosen placeholder obsoletos")
+    except Exception:
+        pass
+
                                                                                                                    
                                                                                                
     faltantes: List[int] = []
@@ -3319,10 +3637,14 @@ def renderizar_video_personalizado_desde_plan(
     for i, seg in enumerate(segmentos, start=1):
         if not isinstance(seg, dict):
             continue
-        sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg.get("image_selection"), dict) else None
+        img_sel = seg.get("image_selection") if isinstance(seg.get("image_selection"), dict) else {}
+        sel = img_sel.get("selected") if isinstance(img_sel, dict) else None
         rel = (sel or {}).get("path") if isinstance(sel, dict) else None
         abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep)) if rel else ""
-        if (not rel) or (not _es_imagen_valida(abs_path)):
+        sel_title = str((sel or {}).get("title") or "").strip().lower() if isinstance(sel, dict) else ""
+        sel_fallback = str((img_sel or {}).get("fallback") or "").strip().lower() if isinstance(img_sel, dict) else ""
+        is_placeholder = ("placeholder" in sel_title) or (sel_fallback == "placeholder")
+        if (not rel) or (not _es_imagen_valida(abs_path)) or is_placeholder or _es_placeholder_generado(abs_path):
             faltantes.append(i)
             base_q = (
                 str(seg.get("image_query") or "").strip()
@@ -3381,7 +3703,7 @@ def renderizar_video_personalizado_desde_plan(
         seg_tag = f"seg_{i_1:02d}"
         for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             cand = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
-            if os.path.exists(cand) and _es_imagen_valida(cand):
+            if os.path.exists(cand) and _es_imagen_valida(cand) and not _es_placeholder_generado(cand):
                 rel = os.path.relpath(cand, carpeta_plan).replace("\\", "/")
                 q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
                 note = str(seg.get("note") or "").strip()
@@ -3437,25 +3759,9 @@ def renderizar_video_personalizado_desde_plan(
         except Exception:
             pass
 
-        try:
-            nombres = os.listdir(carpeta_plan)
-        except Exception:
-            nombres = []
-        prefix = f"{seg_tag}_cand_"
-        cand_files = sorted([n for n in nombres if n.startswith(prefix)])
-        for n in cand_files:
-            absp = os.path.join(carpeta_plan, n)
-            if not _es_imagen_valida(absp):
-                continue
-            ext = os.path.splitext(absp)[1].lower() or ".jpg"
-            stable = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
-            try:
-                with open(absp, "rb") as src, open(stable, "wb") as dst:
-                    dst.write(src.read())
-            except Exception:
-                stable = absp
-
-            rel = os.path.relpath(stable, carpeta_plan).replace("\\", "/")
+        rec = _recuperar_candidato_local(carpeta_plan, seg_tag)
+        if rec:
+            rel = os.path.relpath(rec, carpeta_plan).replace("\\", "/")
             q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
             note = str(seg.get("note") or "").strip()
             seg["image_selection"] = {
@@ -3470,7 +3776,27 @@ def renderizar_video_personalizado_desde_plan(
                     "path": rel,
                 },
             }
-            return stable
+            return rec
+
+        reused = _reusar_chosen_existente(carpeta_plan, seg_tag)
+        if reused:
+            rel = os.path.relpath(reused, carpeta_plan).replace("\\", "/")
+            q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
+            note = str(seg.get("note") or "").strip()
+            seg["image_selection"] = {
+                "query": q,
+                "note": note,
+                "candidates": [],
+                "selected": {
+                    "candidate_index": None,
+                    "score": 1,
+                    "url": None,
+                    "title": "reused_existing_chosen",
+                    "path": rel,
+                },
+                "fallback": "reused",
+            }
+            return reused
                                                                     
         ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
         if ph:
@@ -3510,7 +3836,19 @@ def renderizar_video_personalizado_desde_plan(
                 print(f"[CUSTOM] ❌ Falta imagen seleccionada para segmento {i}")
                 return False
         abs_path = os.path.join(carpeta_plan, rel.replace("/", os.sep))
-        if not _es_imagen_valida(abs_path):
+        if (not _es_imagen_valida(abs_path)) or _es_placeholder_generado(abs_path):
+            if isinstance(seg, dict):
+                rep = _intentar_reparar_seleccion(i, seg)
+                if rep and _es_imagen_valida(rep) and not _es_placeholder_generado(rep):
+                    try:
+                        plan["segments"] = segmentos
+                        with open(plan_file, "w", encoding="utf-8") as f:
+                            json.dump(plan, f, ensure_ascii=False, indent=2)
+                    except Exception:
+                        pass
+                    abs_path = rep
+
+        if (not _es_imagen_valida(abs_path)) or _es_placeholder_generado(abs_path):
                                                                 
             seg_tag = f"seg_{i:02d}"
             ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
@@ -3694,7 +4032,17 @@ def renderizar_video_personalizado_desde_plan(
     with open(plan_file, "w", encoding="utf-8") as f:
         json.dump(plan, f, ensure_ascii=False, indent=2)
 
-    audio_final = combine_audios_with_silence(audios, carpeta_plan, gap_seconds=0, min_seconds=None, max_seconds=None)
+    debug_min_seconds = int(plan.get("target_seconds") or 0)
+    if not (0 < debug_min_seconds <= 10):
+        debug_min_seconds = None
+
+    audio_final = combine_audios_with_silence(
+        audios,
+        carpeta_plan,
+        gap_seconds=0,
+        min_seconds=debug_min_seconds,
+        max_seconds=None,
+    )
     video_final = render_video_ffmpeg(imagenes, audio_final, carpeta_plan, tiempo_img=None, durations=duraciones)
 
     video_con_intro: str | None = None

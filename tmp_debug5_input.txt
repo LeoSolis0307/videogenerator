@@ -1,0 +1,9 @@
+4
+1
+1
+3
+n
+s
+n
+Prueba debug pipeline 5 segundos con historia corta.
+
