@@ -430,7 +430,7 @@ def _accion_generar_voz_local() -> None:
 def _accion_clonar_voz_local() -> None:
     def _buscar_referencias_voz(*, max_items: int = 20) -> list[str]:
         exts = {".wav", ".mp3", ".m4a"}
-        roots = [".", "storage", "output", "historias"]
+        roots = ["voces"]
         skip_dirs = {".git", "__pycache__", ".venv", "venv", "node_modules", "site-packages", "dist-packages"}
         cwd = os.path.abspath(os.getcwd())
         keyword_tokens = {
@@ -486,6 +486,8 @@ def _accion_clonar_voz_local() -> None:
                         continue
 
                     score = 0
+                    if rel.startswith("voces/"):
+                        score += 50
                     if any(tok in stem for tok in keyword_tokens):
                         score += 4
                     if any(tok in rel for tok in keyword_tokens):

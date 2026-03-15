@@ -20,13 +20,11 @@ __pycache__/
 *.mp3
 *.m4a
 
-# Keep voice reference files (voces) versioned
-!*voz*.wav
-!*voz*.mp3
-!*voz*.m4a
-!*voice*.wav
-!*voice*.mp3
-!*voice*.m4a
+# Keep only reference voices under voces/
+!voces/
+!voces/*.wav
+!voces/*.mp3
+!voces/*.m4a
 
 storage/app.db
 
