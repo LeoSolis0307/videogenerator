@@ -1,0 +1,8 @@
+# Dependencias opcionales para clonacion de voz local con XTTS v2.
+# Recomendado usar entorno Python 3.10 en Windows para compatibilidad de Coqui TTS.
+setuptools<81
+TTS==0.22.0
+# Coqui TTS 0.22.0 can break with newer transformers exports.
+transformers<4.40
+# Opcional para backend AMD/DirectML (solo si tu entorno lo soporta).
+torch-directml==0.2.5.dev240914

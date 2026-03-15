@@ -8,6 +8,7 @@ import tempfile
 import wave
 
 import pyttsx3
+from core import local_tts
 
 try:
     import edge_tts
@@ -69,6 +70,43 @@ def _parece_voz_edge(voz: str | None) -> bool:
         return False
                                                            
     return "neural" in voz.lower()
+
+
+def _parece_voz_kokoro(voz: str | None) -> bool:
+    v = (voz or "").strip().lower()
+    if not v:
+        return False
+    return bool(re.match(r"^[a-z]{2}_[a-z0-9]+$", v))
+
+
+def _velocidad_kokoro_factor(velocidad) -> float:
+    if isinstance(velocidad, (int, float)):
+        try:
+            if float(velocidad) > 10:
+                return max(0.5, min(2.0, float(velocidad) / float(VELOCIDAD_WPM_POR_DEFECTO)))
+            return max(0.5, min(2.0, float(velocidad)))
+        except Exception:
+            return 0.95
+
+    if isinstance(velocidad, str):
+        v = velocidad.strip()
+        if not v:
+            return 0.95
+        if v.endswith("%"):
+            try:
+                pct = float(v[:-1])
+                return max(0.5, min(2.0, 1.0 + (pct / 100.0)))
+            except Exception:
+                return 0.95
+        try:
+            n = float(v)
+            if n > 10:
+                return max(0.5, min(2.0, n / float(VELOCIDAD_WPM_POR_DEFECTO)))
+            return max(0.5, min(2.0, n))
+        except Exception:
+            return 0.95
+
+    return 0.95
 
 
 def _velocidad_local_a_wpm(velocidad) -> int:
@@ -223,6 +261,61 @@ def _concat_mp3s_ffmpeg(inputs: list[str], output: str) -> bool:
             pass
 
 
+def _wav_to_mp3_ffmpeg(input_wav: str, output_mp3: str) -> bool:
+    if not _ffmpeg_exists():
+        return False
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_mp3)), exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            input_wav,
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "3",
+            output_mp3,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        return r.returncode == 0 and os.path.exists(output_mp3) and os.path.getsize(output_mp3) > 0
+    except Exception:
+        return False
+
+
+def _generate_silence_mp3_ffmpeg(output_mp3: str, seconds: float) -> bool:
+    if not _ffmpeg_exists():
+        return False
+    dur = max(0.8, float(seconds))
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(output_mp3)), exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=24000:cl=mono",
+            "-t",
+            f"{dur:.2f}",
+            "-codec:a",
+            "libmp3lame",
+            "-q:a",
+            "6",
+            output_mp3,
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return r.returncode == 0 and os.path.exists(output_mp3) and os.path.getsize(output_mp3) > 0
+    except Exception:
+        return False
+
+
 def _edge_emotion_params(
     *,
     chunk_index: int,
@@ -324,6 +417,28 @@ def _strip_urls(text: str) -> str:
     s2 = _EMOJI_RE.sub(" ", s2)
     s2 = re.sub(r"\s+", " ", s2).strip()
     return s2
+
+
+def _soften_text_for_tts(text: str) -> str:
+    s = (text or "").strip()
+    if not s:
+        return ""
+
+    replacements = {
+        r"\bverga\b": "rayos",
+        r"\bching[a-záéíóúñ]*\b": "caray",
+        r"\bpinche\b": "",
+        r"\bculero\b": "malo",
+        r"\bpendej[a-záéíóúñ]*\b": "tonto",
+        r"\bcabr[oó]n\b": "tipo",
+        r"\bput[oa]s?\b": "personas",
+        r"\bmierda\b": "problema",
+    }
+    for pattern, repl in replacements.items():
+        s = re.sub(pattern, repl, s, flags=re.IGNORECASE)
+
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def _xml_escape(s: str) -> str:
@@ -528,6 +643,7 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad, start_index: int
                 chunks = [texto_in]
 
         part_paths: list[str] = []
+        generated_ok = False
 
         for intento in range(3):
             try:
@@ -588,6 +704,7 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad, start_index: int
                 if ok:
                     archivos_audio.append(ruta_completa)
                     print(f"   - Audio {i+1}/{len(textos)} generado.")
+                    generated_ok = True
                     break
             except Exception as e:
                 print(f"   WARNING: Fallo en audio {i} (Intento {intento+1}/3): {e}")
@@ -599,10 +716,156 @@ async def _generar_audios_edge(textos, carpeta, voz, velocidad, start_index: int
                     if intento < 2:
                         await asyncio.sleep(2)
 
+        if generated_ok:
+            continue
+
+        texto_safe = _soften_text_for_tts(texto_in)
+        if not texto_safe or texto_safe == texto_in:
+            print(f"[TTS-EDGE] ERROR: Falló audio {i+1}/{len(textos)} y no se pudo recuperar con texto suavizado.")
+            return []
+
+        softened_ok = False
+        try:
+            print(f"   WARNING: Reintentando audio {i+1} con texto suavizado para TTS...")
+            for p in part_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            part_paths = []
+
+            chunks_safe = _split_text(texto_safe, max_chars=180)
+            chunks_safe = [c for c in chunks_safe if c.strip()]
+            if len(chunks_safe) > max_chunks:
+                chunks_safe = chunks_safe[:max_chunks]
+            if not chunks_safe:
+                chunks_safe = [texto_safe]
+
+            for j, ch in enumerate(chunks_safe):
+                part = os.path.join(carpeta, f"audio_{out_i}_part{j}.mp3")
+                communicate = edge_tts.Communicate(ch, voz, rate=velocidad)
+                await communicate.save(part)
+                if not (os.path.exists(part) and os.path.getsize(part) > 0):
+                    raise RuntimeError("Parte vacía en fallback")
+                part_paths.append(part)
+
+            ok_safe = _concat_mp3s_ffmpeg(part_paths, ruta_completa)
+            if not ok_safe and part_paths:
+                if os.path.exists(ruta_completa):
+                    os.remove(ruta_completa)
+                os.replace(part_paths[0], ruta_completa)
+                part_paths = part_paths[1:]
+                ok_safe = os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0
+
+            for p in part_paths:
+                try:
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+
+            if ok_safe:
+                archivos_audio.append(ruta_completa)
+                print(f"   - Audio {i+1}/{len(textos)} generado (fallback suavizado).")
+                softened_ok = True
+        except Exception as e:
+            print(f"   WARNING: Fallback suavizado falló en audio {i+1}: {e}")
+
+        if softened_ok:
+            continue
+
+        recovered = False
+        wav_tmp = os.path.join(carpeta, f"audio_{out_i}_local.wav")
+        try:
+            print(f"   WARNING: Reintentando audio {i+1} con TTS local de emergencia...")
+            rate_local = _velocidad_local_a_wpm(velocidad)
+            texto_local = texto_safe if texto_safe else texto_in
+            ok_local_wav = _render_wav_subprocess(
+                texto=texto_local,
+                ruta_wav=wav_tmp,
+                voz_id=None,
+                rate_wpm=rate_local,
+                timeout_s=120,
+            )
+            ok_local_mp3 = ok_local_wav and _wav_to_mp3_ffmpeg(wav_tmp, ruta_completa)
+            if ok_local_wav and not ok_local_mp3 and os.path.exists(wav_tmp):
+                if os.path.exists(ruta_completa):
+                    os.remove(ruta_completa)
+                os.replace(wav_tmp, ruta_completa)
+                ok_local_mp3 = os.path.exists(ruta_completa) and os.path.getsize(ruta_completa) > 0
+            if ok_local_mp3:
+                archivos_audio.append(ruta_completa)
+                print(f"   - Audio {i+1}/{len(textos)} generado (fallback local).")
+                recovered = True
+        except Exception as e:
+            print(f"   WARNING: Fallback local falló en audio {i+1}: {e}")
+        finally:
+            try:
+                if os.path.exists(wav_tmp):
+                    os.remove(wav_tmp)
+            except Exception:
+                pass
+
+        if recovered:
+            continue
+
+        print(
+            f"[TTS-EDGE] ERROR: Falló audio {i+1}/{len(textos)} tras reintentos y fallbacks; "
+            "se cancela para evitar render con silencio."
+        )
+        return []
+
     return archivos_audio
 
 
 def generar_audios(textos, carpeta, voz=None, velocidad=None, start_index: int = 0):
+    if isinstance(voz, str) and voz.strip():
+        vlow = voz.strip().lower()
+        if "jorge" in vlow and ("neural" not in vlow or "natural" in vlow):
+            voz = "es-MX-JorgeNeural"
+
+    if _parece_voz_kokoro(voz):
+        rutas_kokoro = []
+        try:
+            start_index = int(start_index or 0)
+        except Exception:
+            start_index = 0
+
+        speed_factor = _velocidad_kokoro_factor(velocidad)
+        total = len(textos)
+        print(f"[TTS-KOKORO] Generando {total} audios con voz='{voz}' (speed={speed_factor:.2f})...")
+
+        for idx, texto in enumerate(textos):
+            out_i = start_index + idx
+            ruta_mp3 = os.path.join(carpeta, f"audio_{out_i}.mp3")
+            texto_in = (texto or "").strip().replace("\u200b", " ")
+            texto_in = _strip_ssml(texto_in)
+            texto_in = _strip_urls(texto_in)
+
+            try:
+                local_tts.synthesize_local_voice(
+                    text=texto_in,
+                    output_path=ruta_mp3,
+                    engine="kokoro",
+                    kokoro_voice=voz,
+                    kokoro_speed=speed_factor,
+                    kokoro_lang="es",
+                    timeout_s=240,
+                )
+            except Exception as e:
+                print(f"[TTS-KOKORO] ERROR: Falló audio {idx+1}/{total}: {e}")
+                return []
+
+            if not (os.path.exists(ruta_mp3) and os.path.getsize(ruta_mp3) > 0):
+                print(f"[TTS-KOKORO] ERROR: Audio vacío {idx+1}/{total}")
+                return []
+
+            rutas_kokoro.append(ruta_mp3)
+            print(f"   - Audio {idx+1}/{total} generado.")
+
+        return rutas_kokoro
+
                         
     if _parece_voz_edge(voz):
         if edge_tts is None:
@@ -656,7 +919,7 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None, start_index: int =
             chunks = _split_text(texto, max_chars=450)
             if len(chunks) == 1:
                 print("[TTS-LOCAL] ERROR: Falló este audio incluso sin split.")
-                continue
+                return []
 
             print(f"[TTS-LOCAL] Reintentando con split en {len(chunks)} partes...")
             temp_paths: list[str] = []
@@ -674,6 +937,10 @@ def generar_audios(textos, carpeta, voz=None, velocidad=None, start_index: int =
                     print(f"[TTS-LOCAL] ERROR: Falló parte {j+1}/{len(chunks)}")
                     temp_paths = []
                     break
+
+            if not temp_paths:
+                print("[TTS-LOCAL] ERROR: No se pudo completar el audio; se cancela para evitar render parcial.")
+                return []
 
             if temp_paths:
                 _concat_wavs(temp_paths, ruta)

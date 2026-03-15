@@ -4,6 +4,7 @@ import os
 import random
 import time
 import shutil
+import hashlib
 
 from PIL import Image
 import requests
@@ -11,6 +12,15 @@ import requests
 from core.ollama_metrics import maybe_print_ollama_speed
 
                         
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name)
+    if val is None:
+        return bool(default)
+    return str(val).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+COMFY_ENABLED = _env_bool("COMFYUI_ENABLED", default=False)
 COMFY_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
 COMFY_WORKFLOW = os.environ.get("COMFYUI_WORKFLOW", "api_bytedance_seedream4.json")
                                                                              
@@ -55,6 +65,10 @@ PROMPTS = [
     "mysterious shadows",
     "cinematic thriller lighting",
 ]
+
+MIN_PROMPTS_PER_VIDEO = 5
+MAX_PROMPTS_PER_VIDEO = 15
+MAX_DUP_RETRIES_PER_IMAGE = 4
 
 
 def _ollama_generar_json(prompt: str) -> dict:
@@ -102,24 +116,92 @@ def generar_prompts_historia(historia: str, *, max_prompts: int = 12) -> list[st
         if isinstance(candidatos, list):
             limpios = [str(p).strip() for p in candidatos if str(p).strip()]
             if limpios:
-                return limpios[:max_prompts]
+                return _dedupe_prompts_text(limpios)[:max_prompts]
     except Exception as e:
         print(f"[IMG] ⚠️ Ollama no devolvió prompts: {e}")
         return []
 
 
-def _extender_prompts_para_duracion(prompts: list[str], dur_audio: float | None, *, max_prompts: int = 12) -> list[str]:
-    base = list(prompts or []) or list(PROMPTS)
+def _target_prompt_count(dur_audio: float | None, base_len: int, *, max_prompts: int = 12) -> int:
+    max_prompts = max(MIN_PROMPTS_PER_VIDEO, min(MAX_PROMPTS_PER_VIDEO, int(max_prompts)))
     if not dur_audio or dur_audio <= 0:
-        return base
+        return min(max_prompts, max(MIN_PROMPTS_PER_VIDEO, int(base_len or 0)))
 
-    segmentos = max(1, math.ceil(dur_audio / 10.0))
-    target = min(max_prompts, max(segmentos, len(base)))
-    seed_list = list(base)
+    segmentos = max(1, math.ceil(float(dur_audio) / 9.0))
+    return min(max_prompts, max(MIN_PROMPTS_PER_VIDEO, max(int(base_len or 0), segmentos)))
+
+
+def _dedupe_prompts_text(prompts: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in prompts or []:
+        txt = str(p or "").strip()
+        if not txt:
+            continue
+        key = " ".join(txt.lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(txt)
+    return out
+
+
+def _variante_prompt(prompt: str, intento: int) -> str:
+    suffixes = [
+        "different composition, new camera angle, different subject pose",
+        "new location details, different framing, altered lighting mood",
+        "distinct perspective shot, changed depth, different scene arrangement",
+        "alternative cinematic setup, different background elements, no repetition",
+    ]
+    sfx = suffixes[(max(1, int(intento)) - 1) % len(suffixes)]
+    return f"{(prompt or '').strip()}, {sfx}, variation {max(1, int(intento))}".strip(" ,")
+
+
+def _extender_prompts_para_duracion(prompts: list[str], dur_audio: float | None, *, max_prompts: int = 12) -> list[str]:
+    base = _dedupe_prompts_text(list(prompts or []) or list(PROMPTS))
+    target = _target_prompt_count(dur_audio, len(base), max_prompts=max_prompts)
+    seed_list = list(base) or list(PROMPTS)
     while len(base) < target:
         seed = seed_list[len(base) % len(seed_list)]
-        base.append(f"{seed} cinematic continuation")
+        base.append(_variante_prompt(seed, len(base) + 1))
     return base[:target]
+
+
+def _image_signature(path: str) -> tuple[int, str]:
+    with Image.open(path) as img:
+        gray = img.convert("L").resize((16, 16), Image.Resampling.BILINEAR)
+        px = list(gray.getdata())
+    avg = sum(px) / max(1, len(px))
+    bits = ["1" if v >= avg else "0" for v in px]
+    bit_str = "".join(bits)
+    digest = hashlib.sha1(bit_str.encode("ascii", errors="ignore")).hexdigest()
+    as_int = int(bit_str, 2)
+    return as_int, digest
+
+
+def _hamming_distance(a: int, b: int) -> int:
+    return (int(a) ^ int(b)).bit_count()
+
+
+def _is_near_duplicate(path: str, accepted_hashes: list[tuple[int, str]], *, max_hamming: int = 10) -> bool:
+    try:
+        h_int, h_txt = _image_signature(path)
+    except Exception:
+        return False
+
+    for prev_int, prev_txt in accepted_hashes:
+        if h_txt == prev_txt:
+            return True
+        if _hamming_distance(h_int, prev_int) <= max_hamming:
+            return True
+    return False
+
+
+def _add_signature(path: str, accepted_hashes: list[tuple[int, str]]) -> None:
+    try:
+        accepted_hashes.append(_image_signature(path))
+    except Exception:
+        pass
 
 
 def _recortar_abajo(path: str, porcentaje: float = 0.20) -> None:
@@ -135,6 +217,8 @@ def _recortar_abajo(path: str, porcentaje: float = 0.20) -> None:
 
 
 def _comfy_workflow_cargado() -> dict | None:
+    if not COMFY_ENABLED:
+        return None
     if not os.path.exists(COMFY_WORKFLOW):
         return None
     try:
@@ -151,9 +235,18 @@ def _comfy_inyectar_prompt(workflow: dict, prompt: str) -> None:
         if not node or "inputs" not in node:
             raise KeyError("Nodo de prompt no encontrado en workflow")
         node["inputs"][COMFY_PROMPT_FIELD] = prompt
-                                                                
-        if "seed" in node.get("inputs", {}):
-            node["inputs"]["seed"] = random.randint(1, 1_000_000_000)
+
+        seed_keys = {"seed", "noise_seed", "random_seed", "sampler_seed"}
+        random_seed = random.randint(1, 1_000_000_000)
+        for n in workflow.values():
+            if not isinstance(n, dict):
+                continue
+            inputs = n.get("inputs")
+            if not isinstance(inputs, dict):
+                continue
+            for k in list(inputs.keys()):
+                if str(k).strip().lower() in seed_keys:
+                    inputs[k] = random_seed
                                                                                              
         if "max_images" in node.get("inputs", {}):
             try:
@@ -241,6 +334,9 @@ def _generar_imagen_comfy(prompt: str, carpeta: str, idx: int, workflow_base: di
 
 def generar_imagen_prueba(prompt: str, carpeta: str) -> str | None:
     prompt = (prompt or "").strip() or random.choice(PROMPTS)
+    if not COMFY_ENABLED:
+        print("[IMG] ℹ️ ComfyUI desactivado (COMFYUI_ENABLED=0)")
+        return None
     workflow = _comfy_workflow_cargado()
     if not workflow:
         print(f"[IMG] ❌ No se encontró workflow ComfyUI en {COMFY_WORKFLOW}")
@@ -262,22 +358,48 @@ def descargar_imagenes(carpeta, cantidad):
 
 def descargar_imagenes_desde_prompts(carpeta: str, prompts: list[str], *, dur_audio: float | None) -> list[str]:
     print("[IMG] Descargando imágenes desde prompts...")
+    if not COMFY_ENABLED:
+        print("[IMG] ℹ️ ComfyUI desactivado (COMFYUI_ENABLED=0); se omite generación por prompts")
+        return []
     workflow = _comfy_workflow_cargado()
     if not workflow:
         print(f"[IMG] ❌ No se encontró workflow ComfyUI en {COMFY_WORKFLOW}")
         return []
 
-    prompts_final = _extender_prompts_para_duracion(prompts, dur_audio)
+    prompts_final = _extender_prompts_para_duracion(prompts, dur_audio, max_prompts=MAX_PROMPTS_PER_VIDEO)
     print(f"[IMG] Usando ComfyUI @ {COMFY_URL} con workflow {COMFY_WORKFLOW} | prompts: {len(prompts_final)}")
 
     rutas = []
+    accepted_hashes: list[tuple[int, str]] = []
     for i, prompt in enumerate(prompts_final):
-        try:
-            rutas.append(_generar_imagen_comfy(prompt, carpeta, i, workflow))
-        except Exception as e:
-            print(f"[IMG] ⚠️ ComfyUI falló en la imagen {i+1}/{len(prompts_final)}: {e}")
+        generated = None
+        last_error = None
+        for intento in range(1, MAX_DUP_RETRIES_PER_IMAGE + 1):
+            prompt_try = prompt if intento == 1 else _variante_prompt(prompt, intento)
+            try:
+                ruta_img = _generar_imagen_comfy(prompt_try, carpeta, i, workflow)
+                if _is_near_duplicate(ruta_img, accepted_hashes):
+                    last_error = RuntimeError("imagen duplicada o demasiado parecida")
+                    try:
+                        os.remove(ruta_img)
+                    except Exception:
+                        pass
+                    continue
+                _add_signature(ruta_img, accepted_hashes)
+                generated = ruta_img
+                break
+            except Exception as e:
+                last_error = e
+
+        if not generated:
+            print(
+                f"[IMG] ⚠️ ComfyUI falló en la imagen {i+1}/{len(prompts_final)} "
+                f"(reintentos {MAX_DUP_RETRIES_PER_IMAGE}): {last_error}"
+            )
             print("[IMG] ❌ Sin alternativas automáticas: abortando generación de imágenes")
             return []
+
+        rutas.append(generated)
 
     if len(rutas) == len(prompts_final):
         print(f"[IMG] {len(rutas)} imágenes listas (ComfyUI)")

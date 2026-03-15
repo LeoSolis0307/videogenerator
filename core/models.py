@@ -1,5 +1,5 @@
 from typing import List, Optional, Any, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 class ScriptSegment(BaseModel):
     text_es: str = Field(description="The narrative text for this segment in Spanish")
@@ -40,5 +40,4 @@ class VideoPlan(BaseModel):
     ids: List[str] = Field(default_factory=list)
     usar_video_base: bool = False
 
-    class Config:
-        extra = "allow" # Allow extra fields for backward compatibility or future expansion
+    model_config = ConfigDict(extra="allow")

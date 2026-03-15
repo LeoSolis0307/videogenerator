@@ -1,4 +1,7 @@
 import json
+import html
+import hashlib
+import builtins
 import math
 import os
 import random
@@ -10,11 +13,10 @@ import requests
 from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote_plus
-import imghdr
 from typing import Tuple
 import time
 import base64
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
                                                                                 
 from core.config import settings
@@ -40,24 +42,66 @@ except Exception:
         DDGS = None
         _DDG_BACKEND = "none"
 
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
+
 # Configuración migrada a core/config.py (settings)
 
+
+def print(*args, **kwargs):
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        file_obj = kwargs.get("file", sys.stdout)
+        enc = getattr(file_obj, "encoding", None) or "utf-8"
+        safe_args = []
+        for a in args:
+            s = str(a)
+            safe_args.append(s.encode(enc, errors="replace").decode(enc, errors="replace"))
+        builtins.print(*safe_args, **kwargs)
+
 def _text_model_for_seconds(target_seconds: int | None) -> str:
-    if settings.ollama_text_model:
-        return settings.ollama_text_model
     try:
         sec = int(target_seconds or 0)
     except Exception:
         sec = 0
+
+    # Para Shorts prioriza siempre modelo corto (más estable y rápido).
+    if sec > 0 and sec < 300:
+        return settings.ollama_text_model_short
+
+    # En largos, si el usuario fijó modelo explícito, respétalo.
+    if settings.ollama_text_model:
+        return settings.ollama_text_model
+
     return settings.ollama_text_model_long if sec >= 300 else settings.ollama_text_model_short
 
 WIKI_API = "https://commons.wikimedia.org/w/api.php"
-OPENVERSE_API = "https://api.openverse.engineering/v1/images"
+OPENVERSE_APIS = [
+    "https://api.openverse.org/v1/images",
+    "https://api.openverse.engineering/v1/images",
+]
+FLICKR_FEED_API = "https://www.flickr.com/services/feeds/photos_public.gne"
+BING_IMG_SEARCH_API = "https://www.bing.com/images/search"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/121.0.0.0 Safari/537.36"
 )
+
+_USER_AGENTS = [
+    USER_AGENT,
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+]
+
+ALLOW_AVIF = bool(settings.allow_avif)
+_DEBUG_IMG_VALIDATION = False
+IMG_ANTIBOT_PROXY = bool(settings.img_antibot_proxy)
+IMG_ANTIBOT_BROWSER = bool(settings.img_antibot_browser)
 
 _SITE_IMAGE_SOURCES: dict[str, str] = {
     "cleanpng": "cleanpng.com",
@@ -69,9 +113,54 @@ _SITE_IMAGE_SOURCES: dict[str, str] = {
     "pixabay": "pixabay.com",
     "pexels": "pexels.com",
     "unsplash": "unsplash.com",
+    "flickr": "flickr.com",
+    "wikipedia": "commons.wikimedia.org",
+    "stockvault": "stockvault.net",
+    "pxhere": "pxhere.com",
+    "publicdomainpictures": "publicdomainpictures.net",
+    "kaboompics": "kaboompics.com",
+    "burst": "burst.shopify.com",
+    "imgur": "imgur.com",
 }
 
 _VISION_AVAILABLE = None
+_ALLOW_PLACEHOLDER_IMAGES = bool(settings.custom_allow_placeholder_images)
+_COMFY_FALLBACK_ON_MISSING = bool(
+    settings.custom_comfy_fallback_on_missing_images and settings.comfyui_enabled
+)
+_DDG_DISABLED_RUNTIME = False
+_OPENVERSE_DISABLED_RUNTIME = False
+
+
+def _detect_image_format(path: str) -> str | None:
+    try:
+        from PIL import Image
+
+        with Image.open(path) as img:
+            fmt = (img.format or "").strip().lower()
+            return fmt or None
+    except Exception:
+        pass
+
+    try:
+        with open(path, "rb") as f:
+            head = f.read(64)
+    except Exception:
+        return None
+
+    if len(head) >= 3 and head[0:3] == b"\xff\xd8\xff":
+        return "jpeg"
+    if len(head) >= 8 and head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if len(head) >= 6 and (head.startswith(b"GIF87a") or head.startswith(b"GIF89a")):
+        return "gif"
+    if len(head) >= 2 and head.startswith(b"BM"):
+        return "bmp"
+    if len(head) >= 12 and head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if len(head) >= 12 and head[4:8] == b"ftyp" and b"avif" in head[8:16].lower():
+        return "avif"
+    return None
 
 
 
@@ -95,6 +184,46 @@ _STOPWORDS_EN = {
     "photo", "image", "picture", "stock", "illustration",
 }
 
+_BAD_QUERY_WORDS = {
+    "pinche", "verga", "chingue", "chingar", "chingado", "chingada", "chingados", "chingadas",
+    "pendejo", "pendeja", "pendejos", "pendejas", "cabrón", "cabron", "cabrona", "culero", "culera",
+    "mierda", "puta", "puto", "putas", "putos", "carajo", "mamada", "mamadisimo", "mamadísimo",
+    "güey", "wey", "wey", "compa", "banda", "morra", "vato", "ruca", "carnal",
+}
+
+_QUERY_TERM_MAP_ES_EN: dict[str, str] = {
+    "gato": "cat",
+    "gata": "cat",
+    "gris": "gray",
+    "perro": "dog",
+    "persona": "person",
+    "hombre": "man",
+    "mujer": "woman",
+    "niño": "boy",
+    "niña": "girl",
+    "cerebro": "brain",
+    "mano": "hand",
+    "ojos": "eyes",
+    "ojo": "eye",
+    "robot": "robot",
+    "implante": "implant",
+    "neural": "neural",
+    "parálisis": "paralysis",
+    "paralisis": "paralysis",
+    "médico": "medical",
+    "medico": "medical",
+    "realista": "realistic",
+    "retrato": "portrait",
+    "primer": "close",
+    "plano": "up",
+}
+
+_ANIMAL_QUERY_TERMS: set[str] = {
+    "cat", "gato", "gata", "dog", "perro", "perra", "rat", "rata", "mouse", "mice",
+    "bird", "pajaro", "pájaro", "horse", "caballo", "cow", "vaca", "lion", "leon", "león",
+    "tiger", "tigre", "wolf", "lobo", "fox", "zorro", "bear", "oso", "fish", "pez",
+}
+
 
 def _tokenize_words(text: str) -> list[str]:
     if not text:
@@ -114,6 +243,8 @@ def _extract_keywords(text: str, *, max_keywords: int = 7) -> list[str]:
         if len(w) < 3:
             continue
         if w in _STOPWORDS_ES or w in _STOPWORDS_EN:
+            continue
+        if w in _BAD_QUERY_WORDS:
             continue
         if w.isdigit():
             continue
@@ -160,7 +291,35 @@ def _build_better_image_query(*, base_query: str, text_es: str = "", note: str =
     q_words = q.split()
     if len(q_words) > 12:
         q = " ".join(q_words[:12])
-    return q or (base or "photo")
+    return _sanitize_image_query(q or (base or "photo"))
+
+
+def _sanitize_image_query(query: str, *, max_words: int = 10) -> str:
+    q = re.sub(r"\s+", " ", str(query or "").strip())
+    if not q:
+        return "person portrait documentary photo"
+
+    words = _tokenize_words(q)
+    clean: list[str] = []
+    for w in words:
+        if len(w) < 3:
+            continue
+        if w in _STOPWORDS_ES or w in _STOPWORDS_EN:
+            continue
+        if w in _BAD_QUERY_WORDS:
+            continue
+        if w.isdigit():
+            continue
+        clean.append(w)
+
+    if len(clean) < 2:
+        clean = _extract_keywords(q, max_keywords=max(4, max_words // 2))
+
+    if not clean:
+        return "person portrait documentary photo"
+
+    out = " ".join(clean[: max(3, int(max_words))]).strip()
+    return out or "person portrait documentary photo"
 
 
 def _candidate_text_relevance(url: str, title: str, *, keywords: list[str]) -> float:
@@ -174,7 +333,56 @@ def _candidate_text_relevance(url: str, title: str, *, keywords: list[str]) -> f
         if kw.lower() in hay_low:
             hits += 1
                                                     
-    return float(hits) + (0.05 if (title or "").strip() else 0.0)
+    score = float(hits) + (0.05 if (title or "").strip() else 0.0)
+    if "neuralink" in hay_low:
+        if any(k in hay_low for k in ["implant", "implante", "chip", "electrode", "n1", "telepathy", "thread"]):
+            score += 2.0
+        elif any(k in hay_low for k in ["elon", "musk", "future", "master plan"]):
+            score -= 0.75
+    return score
+
+
+def _expand_query_terms_es_en(query: str) -> list[str]:
+    toks = _tokenize_words(query)
+    if not toks:
+        return []
+    out: list[str] = []
+    for w in toks:
+        mapped = _QUERY_TERM_MAP_ES_EN.get(w)
+        if mapped and mapped not in out:
+            out.append(mapped)
+    return out
+
+
+def _animal_query_relevance_ok(query: str, title: str, url: str) -> bool:
+    q_words = set(_tokenize_words(_simplify_query(query)))
+    if not q_words:
+        return True
+
+    animal_need = {w for w in q_words if w in _ANIMAL_QUERY_TERMS}
+    for w in _expand_query_terms_es_en(" ".join(q_words)):
+        if w in _ANIMAL_QUERY_TERMS:
+            animal_need.add(w)
+
+    if not animal_need:
+        return True
+
+    hay = f"{title or ''} {url or ''}".lower()
+    return any(a in hay for a in animal_need)
+
+
+def _query_has_neuralink_implant_intent(query: str) -> bool:
+    q_words = set(_tokenize_words(_simplify_query(query)))
+    if "neuralink" not in q_words:
+        return False
+    implant_terms = {"implant", "implante", "chip", "electrode", "electrodo", "n1", "thread", "hilo", "telepathy"}
+    return any(t in q_words for t in implant_terms)
+
+
+def _candidate_matches_neuralink_implant(title: str, url: str) -> bool:
+    text = f"{title or ''} {url or ''}".lower()
+    implant_terms = {"implant", "implante", "chip", "electrode", "electrodo", "n1", "thread", "hilo", "telepathy"}
+    return ("neuralink" in text) and any(t in text for t in implant_terms)
 
                                                                       
                                                                                                                     
@@ -281,6 +489,7 @@ def generar_guion_personalizado_a_plan(
     brief: str,
     *,
     min_seconds: int | None = None,
+    max_seconds: int | None = None,
     seleccionar_imagenes: bool = False,
 ) -> str | None:
     carpeta = crear_carpeta_proyecto(prefix="custom")
@@ -321,10 +530,23 @@ def generar_guion_personalizado_a_plan(
         pass
     plan.seleccionar_imagenes = bool(seleccionar_imagenes)
 
+    # Metadatos de duración para render posterior.
+    try:
+        plan.extra_duration = {
+            "min_seconds": int(min_seconds) if min_seconds is not None else None,
+            "max_seconds": int(max_seconds) if max_seconds is not None else None,
+        }
+    except Exception:
+        pass
+
     plan_path = os.path.join(carpeta, "custom_plan.json")
     try:
+        data = plan.model_dump() if hasattr(plan, "model_dump") else plan.dict()
+        if isinstance(data, dict):
+            data["min_seconds"] = int(min_seconds) if min_seconds is not None else data.get("min_seconds")
+            data["max_seconds"] = int(max_seconds) if max_seconds is not None else data.get("max_seconds")
         with open(plan_path, "w", encoding="utf-8") as f:
-            json.dump(plan.model_dump() if hasattr(plan, "model_dump") else plan.dict(), f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False, indent=2)
         print(f"[CUSTOM] ✅ Plan (solo guion) guardado en {plan_path}")
     except Exception as e:
         print(f"[CUSTOM] ⚠️ No se pudo guardar el plan: {e}")
@@ -773,6 +995,112 @@ def _target_word_range(min_seconds: int) -> tuple[int, int]:
     return max(90, int(base * 0.95)), max(120, int(base * 1.35))
 
 
+def _looks_like_full_story_text(brief: str) -> bool:
+    b = (brief or "").strip()
+    if not b:
+        return False
+    w = _words(b)
+    if w >= 220:
+        return True
+    if w >= 120 and ("\n\n" in b or b.count(".") >= 8):
+        return True
+    return False
+
+
+def _is_transformation_request(brief: str) -> bool:
+    b = (brief or "").strip().lower()
+    if not b:
+        return False
+    head = b[:320]
+    verbs = (
+        "convierte",
+        "transforma",
+        "reescribe",
+        "adapta",
+        "resume",
+        "traduce",
+    )
+    if not any(v in head for v in verbs):
+        return False
+    targets = ("historia", "guion", "narrativo", "video", "español", "espanol")
+    return any(t in head for t in targets)
+
+
+def _extract_source_text_from_transform_brief(brief: str) -> str:
+    b = (brief or "").strip()
+    if not b:
+        return ""
+    if not _is_transformation_request(b):
+        return b
+
+    m = re.search(r"\n\s*\n+", b)
+    if m:
+        tail = b[m.end():].strip()
+        if _words(tail) >= 40:
+            return tail
+
+    lines = [ln.strip() for ln in b.splitlines() if ln.strip()]
+    if len(lines) >= 2:
+        tail2 = "\n".join(lines[1:]).strip()
+        if _words(tail2) >= 40:
+            return tail2
+    return b
+
+
+def _build_preserved_text_plan(brief: str, *, target_seconds: int) -> VideoPlan:
+    source_text = (brief or "").strip()
+    if not source_text:
+        return _build_debug_quick_plan("", target_seconds=max(5, int(target_seconds or 60)))
+
+    if int(target_seconds) >= 300:
+        seg_target = 12
+    else:
+        seg_target = max(6, min(14, int(math.ceil(_words(source_text) / 55.0))))
+
+    seg_texts = _segmentar_texto_en_prompts(source_text, ["x"] * seg_target)
+    if not seg_texts:
+        seg_texts = [source_text]
+
+    segmentos: list[dict[str, Any]] = []
+    for txt in seg_texts:
+        q = _build_better_image_query(
+            base_query="story scene portrait",
+            text_es=txt,
+            note="",
+            brief=source_text[:400],
+        )
+        ip = f"cinematic documentary photo, {q}".strip()
+        note = (txt[:140] + "...") if len(txt) > 140 else txt
+        segmentos.append({
+            "text_es": txt,
+            "image_query": q,
+            "image_prompt": ip,
+            "note": note,
+        })
+
+    first_sentence = re.split(r"(?<=[.!?¡¿])\s+", source_text)[0].strip()
+    hook = first_sentence if first_sentence else "Historia completa sin recortes"
+    title = hook[:80] if hook else "Historia personalizada"
+
+    script_es = source_text
+    prompts_final = [s.get("image_prompt") or s.get("image_query") or "photo" for s in segmentos]
+    timeline_data = _generar_timeline(prompts_final, _estimar_segundos(script_es))
+
+    return VideoPlan(
+        brief=brief,
+        target_seconds=int(target_seconds),
+        title_es=title or "Video personalizado",
+        youtube_title_es=title or "Video personalizado",
+        hook_es=hook,
+        script_es=script_es,
+        segments=[ScriptSegment(**s) for s in segmentos],
+        prompts=prompts_final,
+        timeline=[TimelineItem(**t) for t in timeline_data] if timeline_data else [],
+        contexto_web="",
+        raw_plan={"preserved_source_text": True},
+    )
+
+
 def _build_debug_quick_plan(brief: str, *, target_seconds: int) -> VideoPlan:
     sec = max(3, int(target_seconds or 5))
     brief_clean = re.sub(r"\s+", " ", (brief or "").strip())
@@ -907,14 +1235,28 @@ def _query_matches(query: str, title: str, url: str) -> bool:
         return False
     hay = 0
     text = f"{title} {url}".lower()
+    anchor_terms = {"neuralink", "tesla", "elon", "musk"}
+    implant_terms = {"implant", "implante", "chip", "electrode", "electrodo", "n1", "thread", "hilo", "telepathy"}
+    query_has_implant_intent = ("neuralink" in q_words) and any(t in q_words for t in implant_terms)
+    if query_has_implant_intent:
+        if ("neuralink" in text) and any(t in text for t in implant_terms):
+            return True
+        # Si pides implante/chip, descarta resultados de marca/persona sin señales de hardware.
+        if ("neuralink" in text) and (not any(t in text for t in implant_terms)):
+            return False
+    for a in anchor_terms:
+        if a in q_words and a in text:
+            return True
     for w in q_words:
         if w in text:
             hay += 1
-    return hay >= max(1, len(q_words) // 2)
+    # Mantiene relevancia sin bloquear consultas largas; pide 1-2 coincidencias útiles.
+    required = max(1, min(2, len(q_words) // 2))
+    return hay >= required
 
 
 def _simplify_query(query: str) -> str:
-    query = query.strip()
+    query = _sanitize_image_query(query)
     query = re.sub(r"\s+", " ", query)
     return query[:140]
 
@@ -942,6 +1284,7 @@ def _wikimedia_image_url(query: str) -> str | None:
         return None
 
     for page in pages.values():
+        title = str((page or {}).get("title") or "Wikimedia Commons")
         info = page.get("imageinfo")
         if not info:
             continue
@@ -955,6 +1298,10 @@ def _wikimedia_image_url(query: str) -> str | None:
             continue
         if any(url.lower().endswith(ext) for ext in (".pdf", ".svg", ".djvu")):
             continue
+        if not _query_matches(query, title, str(url)):
+            continue
+        if _query_has_neuralink_implant_intent(query) and (not _candidate_matches_neuralink_implant(title, str(url))):
+            continue
         return url
     return None
 
@@ -965,96 +1312,142 @@ def _buscar_url_imagen(query: str) -> str | None:
 
 
 def _descargar_imagen(url: str, carpeta: str, idx: int) -> str | None:
-    accept_avif = _can_convert_avif() or ALLOW_AVIF
-    accept_header = "image/*,*/*;q=0.8"
-    if accept_avif:
-        accept_header = "image/avif," + accept_header
-    headers = {"User-Agent": USER_AGENT}
-
-                                                                        
-    try:
-        resolved = _resolve_wikimedia_thumb_via_api(url)
-        if resolved:
-            url = resolved
-            headers = {"User-Agent": (_WIKIMEDIA_UA or USER_AGENT)}
-    except Exception:
-        pass
-
-    resp = None
-    last_err: Exception | None = None
-    for attempt in range(1, 4):
-        try:
-            resp = requests.get(url, headers={**headers, "Accept": accept_header}, timeout=30)
-                                                                     
-            if resp.status_code in {401, 403, 404}:
-                resp.raise_for_status()
-            if resp.status_code == 429:
-                retry_after = resp.headers.get("Retry-After")
-                wait = 2.5 * attempt
-                if retry_after:
-                    try:
-                        wait = max(wait, float(retry_after))
-                    except Exception:
-                        pass
-                time.sleep(min(30.0, wait + random.random()))
-                continue
-            resp.raise_for_status()
-            break
-        except Exception as e:
-            last_err = e
-                                                     
-            if attempt < 3:
-                time.sleep(min(8.0, 1.2 * attempt + random.random()))
-            resp = None
-    if resp is None:
-        print(f"[IMG-WEB] Falló descarga: {last_err}")
-        return None
-
-    ct = (resp.headers.get("Content-Type") or "").lower()
-    if ct and ("text/html" in ct or "application/pdf" in ct or "image/svg" in ct):
-        print(f"[IMG-WEB] Contenido no-imagen ({ct}), descartado: {url}")
-        return None
-
     ext = "jpg"
-    for cand in [".jpg", ".jpeg", ".png", ".webp"]:
-        if cand in url.lower():
+    for cand in [".jpg", ".jpeg", ".png", ".webp", ".avif"]:
+        if cand in (url or "").lower():
             ext = cand.replace(".", "")
             break
     os.makedirs(carpeta, exist_ok=True)
-    path = os.path.join(carpeta, f"img_{idx}.{ext}")
+    dst = os.path.join(carpeta, f"img_{idx}.{ext}")
+    return _descargar_imagen_a_archivo(url, dst)
+
+
+def _request_headers_for(url: str, *, attempt: int, accept_header: str, referer: str = "") -> dict[str, str]:
+    idx = max(0, int(attempt) - 1) % len(_USER_AGENTS)
+    headers = {
+        "User-Agent": _USER_AGENTS[idx],
+        "Accept": accept_header,
+        "Accept-Language": "en-US,en;q=0.8,es-ES,es;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "DNT": "1",
+    }
+    if referer:
+        headers["Referer"] = referer
     try:
-        with open(path, "wb") as f:
-            f.write(resp.content)
-                                                                                 
-        real_fmt = imghdr.what(path)
-        if real_fmt == "jpeg":
-            real_ext = "jpg"
-        else:
-            real_ext = real_fmt
+        host = (urlparse(url).netloc or "").lower()
+        if _is_wikimedia_host(host):
+            headers["User-Agent"] = (_WIKIMEDIA_UA or headers["User-Agent"])
+    except Exception:
+        pass
+    return headers
 
-        if real_ext and real_ext != ext:
-            new_path = os.path.join(carpeta, f"img_{idx}.{real_ext}")
-            try:
-                os.replace(path, new_path)
-                path = new_path
-            except Exception:
-                pass
 
-                                                                          
-        if not _es_imagen_valida(path):
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-            print(f"[IMG-WEB] Imagen corrupta, descartada: {url}")
-            return None
-                                                                           
-        path = _convert_webp_to_png_if_needed(path)
-        path = _convert_avif_to_png_if_needed(path)
-        return path
-    except Exception as e:
-        print(f"[IMG-WEB] No se pudo guardar imagen: {e}")
+def _extract_og_image_url(html_bytes: bytes, base_url: str) -> str | None:
+    try:
+        txt = (html_bytes or b"")[:500_000].decode("utf-8", errors="ignore")
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            r'<img[^>]+src=["\']([^"\']+)["\']',
+        ]
+        for pat in patterns:
+            m = re.search(pat, txt, flags=re.IGNORECASE)
+            if not m:
+                continue
+            raw = (m.group(1) or "").strip()
+            if not raw:
+                continue
+            cand = urljoin(base_url, raw)
+            if cand.startswith("http://") or cand.startswith("https://"):
+                return cand
+    except Exception:
         return None
+    return None
+
+
+_WARNED_BROWSER_ANTIBOT = False
+
+
+def _browser_extract_image_url(page_url: str, *, timeout_ms: int = 18000) -> str | None:
+    global _WARNED_BROWSER_ANTIBOT
+    if not IMG_ANTIBOT_BROWSER:
+        return None
+    if sync_playwright is None:
+        if not _WARNED_BROWSER_ANTIBOT:
+            _WARNED_BROWSER_ANTIBOT = True
+            print("[IMG-WEB] ℹ️ IMG_ANTIBOT_BROWSER=1 pero Playwright no está instalado.")
+        return None
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                context = browser.new_context(user_agent=random.choice(_USER_AGENTS), locale="en-US")
+                page = context.new_page()
+                page.goto(page_url, wait_until="domcontentloaded", timeout=int(timeout_ms))
+
+                probes = [
+                    "meta[property='og:image']",
+                    "meta[name='twitter:image']",
+                    "img[src]",
+                ]
+                for sel in probes:
+                    el = page.query_selector(sel)
+                    if not el:
+                        continue
+                    attr = "content" if "meta" in sel else "src"
+                    raw = (el.get_attribute(attr) or "").strip()
+                    if not raw:
+                        continue
+                    cand = urljoin(page.url or page_url, raw)
+                    if cand.startswith("http://") or cand.startswith("https://"):
+                        return cand
+            finally:
+                browser.close()
+    except Exception:
+        return None
+    return None
+
+
+def _download_candidate_urls(url: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(u: str | None) -> None:
+        uu = str(u or "").strip()
+        if not uu:
+            return
+        if not (uu.startswith("http://") or uu.startswith("https://")):
+            return
+        if uu in seen:
+            return
+        seen.add(uu)
+        out.append(uu)
+
+    _add(url)
+    try:
+        resolved = _resolve_wikimedia_thumb_via_api(url)
+        _add(resolved)
+    except Exception:
+        pass
+
+    if IMG_ANTIBOT_PROXY:
+        try:
+            p = urlparse(url)
+            if p.scheme in {"http", "https"} and p.netloc:
+                raw = f"{p.netloc}{p.path or ''}"
+                if p.query:
+                    raw += "?" + p.query
+                from urllib.parse import quote
+
+                q = quote(raw, safe="")
+                _add(f"https://images.weserv.nl/?url={q}&w=1600&output=jpg")
+                _add(f"https://wsrv.nl/?url={q}&w=1600&output=jpg")
+        except Exception:
+            pass
+
+    return out
 
 
 def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
@@ -1073,65 +1466,69 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
     accept_header = "image/webp,image/apng,image/*,*/*;q=0.8"
     if accept_avif:
         accept_header = "image/avif," + accept_header
-    headers = {
-        "User-Agent": USER_AGENT,
-        "Accept": accept_header,
-        "Accept-Language": "en-US,en;q=0.8,es-ES,es;q=0.7",
-    }
-    if referer:
-        headers["Referer"] = referer
-
-                                                                                     
-    try:
-        resolved = _resolve_wikimedia_thumb_via_api(url)
-        if resolved:
-            url = resolved
-            headers["User-Agent"] = (_WIKIMEDIA_UA or headers.get("User-Agent") or USER_AGENT)
-    except Exception:
-        pass
-
     resp = None
+    used_url = url
     last_err: Exception | None = None
-    for attempt in range(1, 4):
-        try:
-            resp = requests.get(url, headers=headers, timeout=30)
-            if resp.status_code in {401, 403, 404}:
+    candidate_urls = _download_candidate_urls(url)
+    for candidate in candidate_urls:
+        used_url = candidate
+        for attempt in range(1, 4):
+            try:
+                headers = _request_headers_for(candidate, attempt=attempt, accept_header=accept_header, referer=referer)
+                resp = requests.get(candidate, headers=headers, timeout=30)
+                if resp.status_code in {401, 403, 404}:
+                    resp.raise_for_status()
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait = 2.5 * attempt
+                    if retry_after:
+                        try:
+                            wait = max(wait, float(retry_after))
+                        except Exception:
+                            pass
+                    time.sleep(min(30.0, wait + random.random()))
+                    continue
                 resp.raise_for_status()
-            if resp.status_code == 429:
-                retry_after = resp.headers.get("Retry-After")
-                wait = 2.5 * attempt
-                if retry_after:
-                    try:
-                        wait = max(wait, float(retry_after))
-                    except Exception:
-                        pass
-                time.sleep(min(30.0, wait + random.random()))
-                continue
-            resp.raise_for_status()
+
+                ct_now = (resp.headers.get("Content-Type") or "").lower()
+                if "text/html" in ct_now:
+                    alt = _extract_og_image_url(resp.content or b"", candidate)
+                    if alt and alt not in candidate_urls:
+                        candidate_urls.append(alt)
+                    if IMG_ANTIBOT_BROWSER:
+                        alt_browser = _browser_extract_image_url(candidate)
+                        if alt_browser and alt_browser not in candidate_urls:
+                            candidate_urls.append(alt_browser)
+                    resp = None
+                    break
+
+                break
+            except Exception as e:
+                last_err = e
+                if attempt < 3:
+                    time.sleep(min(8.0, 1.2 * attempt + random.random()))
+                resp = None
+        if resp is not None:
             break
-        except Exception as e:
-            last_err = e
-            if attempt < 3:
-                time.sleep(min(8.0, 1.2 * attempt + random.random()))
-            resp = None
+
     if resp is None:
         print(f"[IMG-WEB] Falló descarga: {last_err}")
         return None
 
     ct = (resp.headers.get("Content-Type") or "").lower()
     if ct and ("text/html" in ct or "application/pdf" in ct or "image/svg" in ct):
-        print(f"[IMG-WEB] Contenido no-imagen ({ct}), descartado: {url}")
+        print(f"[IMG-WEB] Contenido no-imagen ({ct}), descartado: {used_url}")
         return None
 
     if ("image/avif" in ct) and not (ALLOW_AVIF or _can_convert_avif()):
-        print(f"[IMG-WEB] AVIF no soportado (Content-Type: {ct}), descartado: {url}")
+        print(f"[IMG-WEB] AVIF no soportado (Content-Type: {ct}), descartado: {used_url}")
         return None
 
                                                                                    
     try:
         head = (resp.content or b"")[:512].lstrip().lower()
         if head.startswith(b"<") and (b"<html" in head or b"doctype" in head or b"captcha" in head):
-            print(f"[IMG-WEB] Respuesta parece HTML/captcha, descartado: {url}")
+            print(f"[IMG-WEB] Respuesta parece HTML/captcha, descartado: {used_url}")
             return None
     except Exception:
         pass
@@ -1142,7 +1539,7 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
         with open(tmp_path, "wb") as f:
             f.write(resp.content)
 
-        real_fmt = imghdr.what(tmp_path)
+        real_fmt = _detect_image_format(tmp_path)
         if real_fmt == "jpeg":
             real_ext = "jpg"
         else:
@@ -1161,7 +1558,7 @@ def _descargar_imagen_a_archivo(url: str, dst_path: str) -> str | None:
                 os.remove(final_path)
             except Exception:
                 pass
-            print(f"[IMG-WEB] Imagen corrupta, descartada: {url}")
+            print(f"[IMG-WEB] Imagen corrupta, descartada: {used_url}")
             return None
                                                                            
         final_path = _convert_webp_to_png_if_needed(final_path)
@@ -1266,7 +1663,7 @@ def _normalizar_imagen_descargada(path: str, content_type: str = "") -> str:
             return path
 
         ext = os.path.splitext(path)[1].lower()
-        fmt = (imghdr.what(path) or "").lower()
+        fmt = (_detect_image_format(path) or "").lower()
         ct = (content_type or "").lower()
 
                                                        
@@ -1344,11 +1741,11 @@ def _es_imagen_valida(path: str) -> bool:
             return True
         except ImportError:
                                                 
-            return bool(imghdr.what(path))
+            return bool(_detect_image_format(path))
         except Exception:
                                                                            
                                                                                                           
-            fmt = (imghdr.what(path) or "").lower()
+            fmt = (_detect_image_format(path) or "").lower()
             return fmt in {"jpeg", "png", "gif", "bmp", "webp"}
     except Exception:
         return False
@@ -1398,6 +1795,61 @@ def _es_placeholder_generado(path: str) -> bool:
         return all(lo == hi and lo <= 24 for (lo, hi) in ex)
     except Exception:
         return False
+
+
+def _imagen_fingerprint(path: str) -> str | None:
+    try:
+        if not path or (not os.path.exists(path)):
+            return None
+        h = hashlib.sha1()
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _recuperar_candidato_local_unico(carpeta: str, seg_tag: str, usados_fp: set[str]) -> str | None:
+    cand_paths: list[str] = []
+    try:
+        cand_dir = os.path.join(carpeta, "candidates")
+        if os.path.isdir(cand_dir):
+            for n in sorted(os.listdir(cand_dir)):
+                nlow = n.lower()
+                if not n.startswith(f"{seg_tag}_"):
+                    continue
+                if not nlow.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+                    continue
+                cand_paths.append(os.path.join(cand_dir, n))
+    except Exception:
+        pass
+
+    for absp in cand_paths:
+        if not _es_imagen_valida(absp):
+            continue
+        if _es_placeholder_generado(absp):
+            continue
+        fp = _imagen_fingerprint(absp)
+        if fp and fp in usados_fp:
+            continue
+        ext = os.path.splitext(absp)[1].lower() or ".jpg"
+        stable = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
+        try:
+            with open(absp, "rb") as src, open(stable, "wb") as dst:
+                dst.write(src.read())
+            fp2 = _imagen_fingerprint(stable)
+            if fp2:
+                usados_fp.add(fp2)
+            return stable
+        except Exception:
+            if fp:
+                usados_fp.add(fp)
+            return absp
+    return None
 
 
 def _recuperar_candidato_local(carpeta: str, seg_tag: str) -> str | None:
@@ -1460,9 +1912,39 @@ def _reusar_chosen_existente(carpeta: str, seg_tag_destino: str) -> str | None:
         if not candidatos:
             return None
 
-        src = candidatos[0]
+        idx = 0
+        try:
+            m = re.search(r"seg_(\d+)", str(seg_tag_destino or "").lower())
+            if m:
+                idx = max(0, int(m.group(1)) - 1)
+        except Exception:
+            idx = 0
+
+        src = candidatos[idx % len(candidatos)]
         ext = os.path.splitext(src)[1].lower() or ".jpg"
         dst = os.path.join(carpeta, f"{seg_tag_destino}_chosen{ext}")
+        with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
+            fdst.write(fsrc.read())
+        return dst
+    except Exception:
+        return None
+
+
+def _intentar_fallback_comfy(carpeta: str, seg_tag: str, prompt_hint: str) -> str | None:
+    if not _COMFY_FALLBACK_ON_MISSING:
+        return None
+    try:
+        prompt = (prompt_hint or "").strip() or "cinematic realistic photo"
+        tmp_dir = os.path.join(carpeta, "_fallback_comfy", seg_tag)
+        os.makedirs(tmp_dir, exist_ok=True)
+        rutas = image_downloader.descargar_imagenes_desde_prompts(tmp_dir, [prompt], dur_audio=None)
+        if not rutas:
+            return None
+        src = os.path.abspath(rutas[0])
+        if not _es_imagen_valida(src):
+            return None
+        ext = os.path.splitext(src)[1].lower() or ".png"
+        dst = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
         with open(src, "rb") as fsrc, open(dst, "wb") as fdst:
             fdst.write(fsrc.read())
         return dst
@@ -1509,6 +1991,9 @@ def _limpiar_chosen_obsoletos(carpeta: str) -> int:
 
 
 def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
+    global _DDG_DISABLED_RUNTIME
+    if _DDG_DISABLED_RUNTIME:
+        return []
     if not DDGS:
         return []
 
@@ -1524,13 +2009,25 @@ def _buscar_ddg_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str,
             with DDGS() as ddgs:
                 return list(ddgs.images(query, **kwargs))
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_run)
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        fut = ex.submit(_run)
+        try:
             res = fut.result(timeout=max(5.0, float(settings.ddg_search_timeout_sec)))
+        finally:
+            try:
+                ex.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
     except concurrent.futures.TimeoutError:
+        _DDG_DISABLED_RUNTIME = True
         print(f"[IMG-DDG] Timeout buscando imágenes (>{settings.ddg_search_timeout_sec:.0f}s): {query[:120]}")
+        print("[IMG-DDG] Desactivado en esta ejecución por timeout (fallback a otras fuentes)")
         return []
     except Exception as e:
+        low = str(e).lower()
+        if "403" in low or "forbidden" in low:
+            _DDG_DISABLED_RUNTIME = True
+            print("[IMG-DDG] Desactivado en esta ejecución por bloqueos 403 (fallback a otras fuentes)")
         print(f"[IMG-DDG] Falló búsqueda ({_DDG_BACKEND}): {e}")
         return []
 
@@ -1600,15 +2097,23 @@ def _buscar_wikimedia_imagenes(query: str, *, max_results: int = 8) -> list[Tupl
             continue
         if _is_blocked_image_host(str(url)):
             continue
+        title = str(page.get("title") or "Wikimedia Commons")
+        if not _query_matches(query, title, str(url)):
+            continue
+        if not _animal_query_relevance_ok(query, title, str(url)):
+            continue
         if str(url) in seen:
             continue
         seen.add(str(url))
-        title = str(page.get("title") or "Wikimedia Commons")
         out.append((str(url), title))
     return out
 
 
 def _buscar_openverse_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
+    global _OPENVERSE_DISABLED_RUNTIME
+    if _OPENVERSE_DISABLED_RUNTIME:
+        return []
+
     q = _simplify_query(query)
     if not q:
         return []
@@ -1620,17 +2125,28 @@ def _buscar_openverse_imagenes(query: str, *, max_results: int = 8) -> list[Tupl
     }
     headers = {"User-Agent": USER_AGENT}
 
-    try:
-        resp = requests.get(OPENVERSE_API, params=params, headers=headers, timeout=max(5.0, float(settings.openverse_timeout_sec)))
-        if resp.status_code == 429:
-            return []
-        resp.raise_for_status()
-        data = resp.json() if resp.content else {}
-        results = data.get("results") or []
-        if not isinstance(results, list):
-            return []
-    except Exception as e:
-        print(f"[IMG-OV] Openverse fallo: {e}")
+    results = []
+    last_err: Exception | None = None
+    for api in OPENVERSE_APIS:
+        try:
+            resp = requests.get(api, params=params, headers=headers, timeout=max(5.0, float(settings.openverse_timeout_sec)))
+            if resp.status_code == 401:
+                _OPENVERSE_DISABLED_RUNTIME = True
+                print("[IMG-OV] Openverse 401 Unauthorized; desactivado en esta ejecución")
+                return []
+            if resp.status_code == 429:
+                continue
+            resp.raise_for_status()
+            data = resp.json() if resp.content else {}
+            results = data.get("results") or []
+            if isinstance(results, list):
+                break
+        except Exception as e:
+            last_err = e
+            continue
+    if not isinstance(results, list) or not results:
+        if last_err is not None:
+            print(f"[IMG-OV] Openverse fallo: {last_err}")
         return []
 
     out: list[Tuple[str, str]] = []
@@ -1663,10 +2179,128 @@ def _buscar_openverse_imagenes(query: str, *, max_results: int = 8) -> list[Tupl
     return out
 
 
+def _buscar_flickr_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
+    q = _simplify_query(query)
+    if not q:
+        return []
+
+    params = {
+        "format": "json",
+        "nojsoncallback": "1",
+        "lang": "en-us",
+        "tagmode": "all",
+        "tags": ",".join(_extract_keywords(q, max_keywords=6) or q.split()[:4]),
+    }
+    try:
+        resp = requests.get(
+            FLICKR_FEED_API,
+            params=params,
+            headers={"User-Agent": USER_AGENT, "Accept": "application/json,text/plain,*/*"},
+            timeout=max(8.0, float(settings.openverse_timeout_sec)),
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        items = data.get("items") or []
+        if not isinstance(items, list):
+            return []
+    except Exception as e:
+        print(f"[IMG-FLICKR] Flickr fallo: {e}")
+        return []
+
+    out: list[Tuple[str, str]] = []
+    seen: set[str] = set()
+    for it in items:
+        if len(out) >= int(max_results):
+            break
+        if not isinstance(it, dict):
+            continue
+        media = it.get("media") or {}
+        url = str(media.get("m") or "").strip()
+        if not url:
+            continue
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        if _is_blocked_image_host(url):
+            continue
+        title = str(it.get("title") or "Flickr")
+        if not _query_matches(query, title, url):
+            continue
+        if not _animal_query_relevance_ok(query, title, url):
+            continue
+        if any(url.lower().endswith(ext) for ext in (".svg", ".pdf", ".djvu")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append((url, title))
+    return out
+
+
+def _buscar_bing_imagenes(query: str, *, max_results: int = 8) -> list[Tuple[str, str]]:
+    q = _simplify_query(query)
+    if not q:
+        return []
+
+    params = {
+        "q": q,
+        "form": "HDRSC2",
+        "first": "1",
+        "tsc": "ImageBasicHover",
+    }
+    try:
+        resp = requests.get(
+            BING_IMG_SEARCH_API,
+            params=params,
+            headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"},
+            timeout=max(8.0, float(settings.openverse_timeout_sec)),
+        )
+        resp.raise_for_status()
+        page_html = resp.text or ""
+    except Exception as e:
+        print(f"[IMG-BING] Bing fallo: {e}")
+        return []
+
+    out: list[Tuple[str, str]] = []
+    seen: set[str] = set()
+
+    payloads = re.findall(r'\bm="([^"]{80,3500})"', page_html)
+    for raw_payload in payloads:
+        if len(out) >= int(max_results):
+            break
+        try:
+            txt = html.unescape(raw_payload)
+            data = json.loads(txt)
+            if not isinstance(data, dict):
+                continue
+            url = str(data.get("murl") or "").strip()
+            title = str(data.get("t") or data.get("desc") or "Bing Images").strip()
+        except Exception:
+            continue
+
+        if not url:
+            continue
+        if not (url.startswith("http://") or url.startswith("https://")):
+            continue
+        if any(url.lower().endswith(ext) for ext in (".svg", ".pdf", ".djvu")):
+            continue
+        if _is_blocked_image_host(url):
+            continue
+        if not _query_matches(query, title, url):
+            continue
+        if not _animal_query_relevance_ok(query, title, url):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append((url, title or "Bing Images"))
+
+    return out
+
+
 def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[str, str, str]]:
-    sources = [s.strip() for s in (settings.img_sources or "").split(",") if s.strip()]
+    sources = settings.img_sources_list
     if not sources:
-        sources = ["ddg", "openverse", "wikimedia"]
+        sources = ["ddg", "openverse", "wikimedia", "flickr", "sites"]
 
     out: list[Tuple[str, str, str]] = []
     seen: set[str] = set()
@@ -1684,6 +2318,8 @@ def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[st
     def _buscar_en_sitios(keys: list[str]) -> list[Tuple[str, str, str]]:
         out_sites: list[Tuple[str, str, str]] = []
         seen_sites: set[str] = set()
+        if _DDG_DISABLED_RUNTIME or (DDGS is None):
+            return out_sites
         if not keys:
             keys = list(_SITE_IMAGE_SOURCES.keys())
         per_site_max = 2 if int(max_results) > 3 else 1
@@ -1711,6 +2347,10 @@ def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[st
             _add(_buscar_wikimedia_imagenes(query, max_results=max_results), "wikimedia")
         elif src in {"openverse", "ov"}:
             _add(_buscar_openverse_imagenes(query, max_results=max_results), "openverse")
+        elif src in {"flickr", "flickr_public"}:
+            _add(_buscar_flickr_imagenes(query, max_results=max_results), "flickr")
+        elif src in {"bing", "bing_images"}:
+            _add(_buscar_bing_imagenes(query, max_results=max_results), "bing")
         elif src in {"sites", "pngsites", "stocksites"}:
             for u, t, sname in _buscar_en_sitios(list(_SITE_IMAGE_SOURCES.keys())):
                 _add([(u, t)], sname)
@@ -1720,7 +2360,70 @@ def _buscar_imagenes_multi(query: str, *, max_results: int = 8) -> list[Tuple[st
         else:
             continue
 
+    # Rescate: aunque IMG_SOURCES venga limitado o una fuente falle (p.ej. Openverse 401),
+    # intenta fuentes estables para no perder candidatos de calidad.
+    if len(out) < int(max_results):
+        rescue_order = ["wikimedia", "flickr", "bing"]
+        for src in rescue_order:
+            if len(out) >= int(max_results):
+                break
+            if src in {"wikimedia", "wiki"}:
+                _add(_buscar_wikimedia_imagenes(query, max_results=max_results), "wikimedia")
+            elif src in {"flickr", "flickr_public"}:
+                _add(_buscar_flickr_imagenes(query, max_results=max_results), "flickr")
+            elif src in {"bing", "bing_images"}:
+                _add(_buscar_bing_imagenes(query, max_results=max_results), "bing")
+
+    # Último rescate (si DDG está disponible) con consulta por sitios conocidos.
+    allow_site_rescue = any(s in {"sites", "pngsites", "stocksites"} for s in sources)
+    if allow_site_rescue and len(out) < int(max_results):
+        for u, t, sname in _buscar_en_sitios(list(_SITE_IMAGE_SOURCES.keys())):
+            _add([(u, t)], sname)
+            if len(out) >= int(max_results):
+                break
+
     return out
+
+
+def _build_query_variants(q_search: str, note: str, original_q: str) -> list[str]:
+    base = _sanitize_image_query(q_search)
+    out: list[str] = []
+
+    def _add(q: str) -> None:
+        qq = _sanitize_image_query(q)
+        if qq and qq not in out:
+            out.append(qq)
+
+    _add(base)
+    if note:
+        _add(f"{base} {note}")
+    if original_q:
+        _add(original_q)
+
+    translated_terms = _expand_query_terms_es_en(f"{base} {note} {original_q}")
+    if translated_terms:
+        _add(" ".join(translated_terms))
+        _add(f"{' '.join(translated_terms)} realistic photo")
+        _add(f"{' '.join(translated_terms)} close up portrait")
+
+    kws = _extract_keywords(f"{base} {note} {original_q}", max_keywords=8)
+    if kws:
+        _add(" ".join(kws[:6]))
+        if len(kws) >= 3:
+            _add(" ".join(kws[:3]))
+
+    # Variantes fotográficas para mejorar recall sin bajar demasiado calidad.
+    _add(f"{base} documentary photo")
+    _add(f"{base} realistic photo")
+
+    if _query_has_neuralink_implant_intent(f"{base} {note} {original_q}"):
+        _add("neuralink implant n1 device close up")
+        _add("neuralink chip electrode thread brain implant")
+        _add("brain computer interface neuralink implant hardware")
+        _add("neuralink n1 implant chip close-up macro -elon -musk -presentation -stage")
+        _add("neuralink electrode threads implant surgery device photo")
+
+    return out[:10]
 
 
 def _puntuar_con_moondream(path: str, query: str, *, note: str = "") -> int:
@@ -1785,9 +2488,32 @@ def descargar_mejores_imagenes_ddg(
         return out_u
 
     used_urls: set[str] = set()
+    used_fingerprints: set[str] = set()
+    try:
+        for n in os.listdir(carpeta):
+            low = n.lower()
+            if not low.startswith("seg_"):
+                continue
+            if "_chosen" not in low:
+                continue
+            if not low.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
+                continue
+            p = os.path.join(carpeta, n)
+            if (not _es_imagen_valida(p)) or _es_placeholder_generado(p):
+                continue
+            fp0 = _imagen_fingerprint(p)
+            if fp0:
+                used_fingerprints.add(fp0)
+    except Exception:
+        pass
 
     for idx, q in enumerate(queries):
         note = notes[idx] if idx < len(notes) else ""
+        q_search = _sanitize_image_query(q)
+        strict_neuralink_implant = _query_has_neuralink_implant_intent(q)
+        min_score_effective = max(1, int(settings.custom_min_img_score))
+        if strict_neuralink_implant:
+            min_score_effective = max(min_score_effective, 3)
 
         seg_n = (segment_numbers[idx] if segment_numbers is not None else (idx + 1))
         is_hook = int(seg_n) <= int(settings.custom_hook_segments)
@@ -1797,12 +2523,22 @@ def descargar_mejores_imagenes_ddg(
         if is_hook:
             local_max = max(local_max, int(max_per_query) + max(0, int(settings.custom_hook_extra_candidates)))
 
-        candidatos = _buscar_imagenes_multi(q, max_results=local_max)
+        candidatos = _buscar_imagenes_multi(q_search, max_results=local_max)
+
+        # Reintento inteligente con variantes de query si no llegaron candidatos.
+        if not candidatos:
+            merged_retry: List[Tuple[str, str, str]] = []
+            for qv in _build_query_variants(q_search, note, q):
+                merged_retry.extend(_buscar_imagenes_multi(qv, max_results=max(8, local_max // 2)))
+                if len(merged_retry) >= int(local_max):
+                    break
+            candidatos = _uniq_candidates(merged_retry)[: int(local_max)]
+
         if is_hook:
             variants = [
-                q,
-                f"{q} close up photo",
-                f"{q} dramatic lighting photo",
+                q_search,
+                f"{q_search} close up photo",
+                f"{q_search} dramatic lighting photo",
             ]
             merged: List[Tuple[str, str, str]] = []
             for v in variants:
@@ -1819,13 +2555,22 @@ def descargar_mejores_imagenes_ddg(
                     reverse=True,
                 )
                 candidatos = candidatos[: int(local_max)]
+
+        if candidatos and _query_has_neuralink_implant_intent(q):
+            fuertes = [
+                (u, t, src)
+                for (u, t, src) in candidatos
+                if _candidate_matches_neuralink_implant(t, u)
+            ]
+            if fuertes:
+                candidatos = fuertes[: int(local_max)]
                                                                      
         if candidatos:
             candidatos = [(u, t, src) for (u, t, src) in candidatos if u not in used_urls]
 
         if not candidatos:
                                                                                   
-            wiki_url = _wikimedia_image_url(_simplify_query(q))
+            wiki_url = _wikimedia_image_url(_simplify_query(q_search))
             if wiki_url:
                 seg_tag = f"seg_{int(seg_n):02d}"
                 dst = os.path.join(cand_dir, f"{seg_tag}_wiki_01.jpg")
@@ -1850,7 +2595,7 @@ def descargar_mejores_imagenes_ddg(
                         "candidates": [],
                         "selected": {
                             "candidate_index": 1,
-                            "score": int(max(1, settings.custom_min_img_score)),
+                            "score": int(min_score_effective),
                             "url": wiki_url,
                             "title": "Wikimedia Commons",
                             "path": os.path.relpath(saved, carpeta).replace("\\", "/"),
@@ -1881,6 +2626,10 @@ def descargar_mejores_imagenes_ddg(
             dst = os.path.join(cand_dir, f"{seg_tag}_{k:02d}{ext}")
             saved = _descargar_imagen_a_archivo(url, dst)
             if not saved:
+                continue
+
+            fp = _imagen_fingerprint(saved)
+            if fp and fp in used_fingerprints:
                 continue
 
             try:
@@ -1917,7 +2666,7 @@ def descargar_mejores_imagenes_ddg(
 
                                                                                                   
         if best_path is None:
-            wiki_url = _wikimedia_image_url(_simplify_query(q))
+            wiki_url = _wikimedia_image_url(_simplify_query(q_search))
             if wiki_url:
                 dst = os.path.join(cand_dir, f"{seg_tag}_wiki_01.jpg")
                 saved = _descargar_imagen_a_archivo(wiki_url, dst)
@@ -1932,10 +2681,10 @@ def descargar_mejores_imagenes_ddg(
         if is_hook and best_score < int(settings.custom_hook_min_img_score):
             extra_max = max(local_max, int(max_per_query) + int(settings.custom_hook_extra_candidates) + 12)
             variants2 = [
-                q,
-                f"{q} close up",
-                f"{q} high contrast photo",
-                f"{q} cinematic still photo",
+                q_search,
+                f"{q_search} close up",
+                f"{q_search} high contrast photo",
+                f"{q_search} cinematic still photo",
             ]
             seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
             merged2: List[Tuple[str, str, str]] = []
@@ -1952,6 +2701,9 @@ def descargar_mejores_imagenes_ddg(
                 dst = os.path.join(cand_dir, f"{seg_tag}_{k2:02d}{ext}")
                 saved = _descargar_imagen_a_archivo(url, dst)
                 if not saved:
+                    continue
+                fp = _imagen_fingerprint(saved)
+                if fp and fp in used_fingerprints:
                     continue
                 try:
                     score_note = (note or "").strip()
@@ -1984,7 +2736,7 @@ def descargar_mejores_imagenes_ddg(
                                                                                                         
         if (best_score < int(settings.custom_min_img_score)) and (settings.custom_img_quality in {"high", "alta", "best", "max", "maxima", "máxima"}):
             extra = 32 if settings.custom_img_quality in {"best", "max", "maxima", "máxima"} else 20
-            candidatos2 = _buscar_imagenes_multi(q, max_results=max(max_per_query, extra))
+            candidatos2 = _buscar_imagenes_multi(q_search, max_results=max(max_per_query, extra))
                                              
             seen = {m.get("url") for m in cand_meta if isinstance(m, dict)}
             nuevos = [(u, t, src) for (u, t, src) in candidatos2 if u not in seen]
@@ -1998,6 +2750,9 @@ def descargar_mejores_imagenes_ddg(
                 dst = os.path.join(cand_dir, f"{seg_tag}_{k2:02d}{ext}")
                 saved = _descargar_imagen_a_archivo(url, dst)
                 if not saved:
+                    continue
+                fp = _imagen_fingerprint(saved)
+                if fp and fp in used_fingerprints:
                     continue
                 try:
                     score = _puntuar_con_moondream(saved, q, note=note)
@@ -2022,7 +2777,7 @@ def descargar_mejores_imagenes_ddg(
                     break
 
         selected = None
-        if best_path and best_score >= int(settings.custom_min_img_score):
+        if best_path and best_score >= int(min_score_effective):
                                                            
             ext = os.path.splitext(best_path)[1].lower() or ".jpg"
             stable = os.path.join(carpeta, f"{seg_tag}_chosen{ext}")
@@ -2037,6 +2792,9 @@ def descargar_mejores_imagenes_ddg(
             rutas.append(best_path)
             if best_url:
                 used_urls.add(best_url)
+            fp_best = _imagen_fingerprint(best_path)
+            if fp_best:
+                used_fingerprints.add(fp_best)
             selected = {
                 "candidate_index": best_k,
                 "score": int(best_score),
@@ -2788,6 +3546,8 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     if not brief_in:
         raise ValueError("Brief vacio")
 
+    brief_source = _extract_source_text_from_transform_brief(brief_in)
+
                                                                
     target_seconds = int(min_seconds or settings.custom_min_video_sec)
     if target_seconds <= 10:
@@ -2798,17 +3558,29 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     if target_seconds <= 10:
         return _build_debug_quick_plan(brief_in, target_seconds=target_seconds)
 
-    brief = _sanitize_brief_for_duration(brief_in) or brief_in
-    hook_hint = _extract_hook_from_brief(brief_in)
-    tone_hint = _extract_tone_from_brief(brief_in)
-    require_curious_final = _requires_curious_final(brief_in, tone_hint)
+    if _looks_like_full_story_text(brief_in) and not _is_transformation_request(brief_in):
+        return _build_preserved_text_plan(brief_in, target_seconds=target_seconds)
+
+    brief = _sanitize_brief_for_duration(brief_source) or brief_source
+    hook_hint = _extract_hook_from_brief(brief_source)
+    tone_hint = _extract_tone_from_brief(brief_source)
+    require_curious_final = _requires_curious_final(brief_source, tone_hint)
 
     # Modo documental (chunking por capítulos) para 5-20 minutos.
     # Se puede desactivar con env CUSTOM_LONG_CHUNKING=0.
     doc_long = int(target_seconds) >= 300
     chunking_enabled = (os.environ.get("CUSTOM_LONG_CHUNKING") or "1").strip().lower() not in {"0", "false", "no"}
 
-    contexto = _buscar_contexto_web(brief)
+    # En modo corto priorizamos velocidad y evitamos búsqueda web para bajar latencia.
+    if int(target_seconds) < 300:
+        contexto = ""
+    else:
+        contexto = _buscar_contexto_web(brief)
+
+    fast_short_mode = (
+        int(target_seconds) < 300
+        and (os.environ.get("CUSTOM_FAST_MODE") or "").strip().lower() in {"1", "true", "yes", "si", "sí", "on"}
+    )
 
                                                                           
     plan: Dict[str, Any] | None = None
@@ -2843,11 +3615,20 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
 
         print(f"[CUSTOM] 📝 Generando plan largo (~{target_seconds}s) (ctx={min_ctx}, tokens={tokens_limit})")
     else:
-        tokens_limit = 2200
-        timeout = 300
+        tokens_limit = 1300
+        timeout = 140
         min_ctx = None
 
+    if fast_short_mode:
+        tokens_limit = min(tokens_limit, 900)
+        timeout = min(timeout, 120)
+
     timeout = max(settings.ollama_timeout, timeout)
+    # Evita bloqueos muy largos en guiones cortos si OLLAMA_TIMEOUT está alto (ej. 900).
+    if int(target_seconds) < 300:
+        timeout = min(timeout, 240)
+    else:
+        timeout = min(timeout, 900)
 
     def _prompt_doc_outline(
         brief_txt: str,
@@ -3139,7 +3920,10 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
         }
         return plan_obj, segs, title_es, hook_es, script_es
 
-    for _ in range(3):
+    max_attempts = 2 if int(target_seconds) < 300 else 3
+    if fast_short_mode:
+        max_attempts = 1
+    for _ in range(max_attempts):
         if doc_long and chunking_enabled:
             plan, segmentos, titulo, hook, script = _doc_long_generate_with_chunking()
         else:
@@ -3214,19 +3998,21 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
             if seg_count < 12:
                 continue
         else:
-            if seg_count < 6:
+            if seg_count < (5 if fast_short_mode else 6):
                 continue
         if target_seconds >= 300 and minw < 25:
             continue
-        if target_seconds < 300 and minw < 40:
+        if target_seconds < 300 and minw < (28 if fast_short_mode else 40):
             continue
 
         quality_issues = _plan_quality_issues(segmentos, target_seconds=target_seconds)
         if quality_issues:
             print(f"[CUSTOM] ⚠️ Plan rechazado por calidad: {', '.join(quality_issues)}")
-            continue
+            if not fast_short_mode:
+                continue
         wmin, _wmax = _target_word_range(target_seconds)
-        if total_words < int(wmin * 0.70):
+        min_ratio = 0.55 if fast_short_mode else 0.70
+        if total_words < int(wmin * min_ratio):
             continue
 
         break
@@ -3274,6 +4060,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                                                                                   
     est = _estimar_segundos(script)
     if est < float(target_seconds):
+        expand_timeout = min(max(settings.ollama_timeout, 140), 220 if target_seconds < 300 else 320)
         for _ in range(6):
                                                      
             cur_words = _words(script)
@@ -3287,7 +4074,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                 add_prompt,
                 temperature=0.55,
                 max_tokens=1800,
-                timeout_sec=max(settings.ollama_timeout, 300),
+                timeout_sec=expand_timeout,
                 model=model_text,
             )
             try:
@@ -3302,7 +4089,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
                     fix,
                     temperature=0.2,
                     max_tokens=1800,
-                    timeout_sec=max(settings.ollama_timeout, 300),
+                    timeout_sec=expand_timeout,
                     model=model_text,
                 )
                 arr = _extract_json_array(raw2)
@@ -3332,6 +4119,58 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
             est = _estimar_segundos(script)
             if est >= float(target_seconds):
                 break
+
+        if est < float(target_seconds):
+            # Fallback final: reescribir TODO el plan para cumplir mínimo de duración.
+            try:
+                expand_prompt = _prompt_expand_to_min_duration(
+                    brief,
+                    contexto,
+                    plan if isinstance(plan, dict) else {},
+                    min_seconds=int(target_seconds),
+                )
+                expand_model = settings.ollama_text_model_short if int(target_seconds) < 300 else model_text
+                expanded = _ollama_generate_json_with_timeout(
+                    expand_prompt,
+                    temperature=0.45,
+                    max_tokens=2400,
+                    timeout_sec=expand_timeout,
+                    model=expand_model,
+                )
+                if isinstance(expanded, dict):
+                    raw_segments2 = expanded.get("segments") or []
+                    seg2: List[Dict[str, Any]] = []
+                    seen2 = set()
+                    if isinstance(raw_segments2, list):
+                        for s in raw_segments2:
+                            if not isinstance(s, dict):
+                                continue
+                            texto2 = str(s.get("text_es") or "").strip()
+                            if not texto2 or texto2 in seen2:
+                                continue
+                            seen2.add(texto2)
+                            query2 = str(s.get("image_query") or "").strip()
+                            iprompt2 = str(s.get("image_prompt") or "").strip() or query2
+                            note2 = str(s.get("note") or "").strip()
+                            seg2.append({
+                                "text_es": texto2,
+                                "image_query": query2,
+                                "image_prompt": iprompt2,
+                                "note": note2,
+                            })
+
+                    if seg2:
+                        segmentos = seg2
+                        script = " ".join([s.get("text_es", "") for s in seg2]).strip()
+                        plan["segments"] = seg2
+                        plan["script_es"] = script
+                        if expanded.get("title_es"):
+                            plan["title_es"] = str(expanded.get("title_es") or "").strip()
+                        if expanded.get("hook_es"):
+                            plan["hook_es"] = str(expanded.get("hook_es") or "").strip()
+                        est = _estimar_segundos(script)
+            except Exception:
+                pass
 
         if est < float(target_seconds):
             raise RuntimeError(
@@ -3378,7 +4217,7 @@ def generar_plan_personalizado(brief: str, *, min_seconds: int | None = None, ma
     timeline_data = _generar_timeline(prompts_final, _estimar_segundos(script))
 
     return VideoPlan(
-        brief=brief_in,
+        brief=brief,
         target_seconds=int(target_seconds),
         title_es=titulo or "Video personalizado",
         youtube_title_es=titulo or "Video personalizado",
@@ -3476,10 +4315,21 @@ def generar_video_personalizado(
         print("[CUSTOM] No se generaron audios")
         return False
 
-    min_items = min(len(audios), len(imagenes), len(textos))
-    audios = audios[:min_items]
-    imagenes = imagenes[:min_items]
-    textos = textos[:min_items]
+    if len(audios) != len(textos):
+        print(
+            f"[CUSTOM] ❌ Falló TTS: se generaron {len(audios)}/{len(textos)} audios. "
+            "Se cancela el render para evitar video incompleto o con silencio."
+        )
+        return False
+
+    if len(imagenes) != len(textos):
+        print(
+            f"[CUSTOM] ❌ Desbalance plan/imagenes: imagenes={len(imagenes)} textos={len(textos)}. "
+            "Se cancela el render."
+        )
+        return False
+
+    min_items = len(textos)
 
     duraciones = [max(0.6, audio_duration_seconds(a)) for a in audios]
 
@@ -3516,12 +4366,53 @@ def generar_video_personalizado(
     if not (0 < debug_min_seconds <= 10):
         debug_min_seconds = None
 
+    plan_min_seconds = plan.get("min_seconds") if isinstance(plan, dict) else None
+    plan_max_seconds = plan.get("max_seconds") if isinstance(plan, dict) else None
+    try:
+        plan_min_seconds = int(plan_min_seconds) if plan_min_seconds is not None else None
+    except Exception:
+        plan_min_seconds = None
+    try:
+        plan_max_seconds = int(plan_max_seconds) if plan_max_seconds is not None else None
+    except Exception:
+        plan_max_seconds = None
+
+    try:
+        default_short_min = int(settings.custom_min_video_sec or 40)
+    except Exception:
+        default_short_min = 40
+
+    # Compatibilidad: planes antiguos guardaban 60s por defecto en modo corto.
+    if plan_min_seconds is None:
+        plan_min_seconds = default_short_min
+    elif int(plan_min_seconds) == 60 and default_short_min == 40:
+        plan_min_seconds = 40
+
+    # En modo corto, fija rango 40-180 por defecto, conservando modo largo/debug.
+    if plan_min_seconds < 300:
+        if plan_min_seconds > 10 and plan_min_seconds < 40:
+            plan_min_seconds = 40
+        if plan_max_seconds is None:
+            plan_max_seconds = 180
+        else:
+            plan_max_seconds = min(int(plan_max_seconds), 180)
+
+    preserve_full_text = False
+    try:
+        raw_plan = plan.get("raw_plan") if isinstance(plan, dict) else None
+        preserve_full_text = bool((raw_plan or {}).get("preserved_source_text")) if isinstance(raw_plan, dict) else False
+    except Exception:
+        preserve_full_text = False
+
+    audio_min = debug_min_seconds if debug_min_seconds is not None else plan_min_seconds
+    audio_max = None if preserve_full_text else plan_max_seconds
+
     audio_final = combine_audios_with_silence(
         audios,
         carpeta,
         gap_seconds=0,
-        min_seconds=debug_min_seconds,
-        max_seconds=None,
+        min_seconds=audio_min,
+        max_seconds=audio_max,
     )
 
     video_final = render_video_ffmpeg(imagenes, audio_final, carpeta, tiempo_img=None, durations=duraciones)
@@ -3634,6 +4525,7 @@ def renderizar_video_personalizado_desde_plan(
     faltantes: List[int] = []
     q_falt: List[str] = []
     n_falt: List[str] = []
+    seen_img_fp: set[str] = set()
     for i, seg in enumerate(segmentos, start=1):
         if not isinstance(seg, dict):
             continue
@@ -3644,7 +4536,18 @@ def renderizar_video_personalizado_desde_plan(
         sel_title = str((sel or {}).get("title") or "").strip().lower() if isinstance(sel, dict) else ""
         sel_fallback = str((img_sel or {}).get("fallback") or "").strip().lower() if isinstance(img_sel, dict) else ""
         is_placeholder = ("placeholder" in sel_title) or (sel_fallback == "placeholder")
-        if (not rel) or (not _es_imagen_valida(abs_path)) or is_placeholder or _es_placeholder_generado(abs_path):
+        is_dup = False
+        if rel and _es_imagen_valida(abs_path) and (not _es_placeholder_generado(abs_path)):
+            fp = _imagen_fingerprint(abs_path)
+            if fp:
+                if fp in seen_img_fp:
+                    is_dup = True
+                else:
+                    seen_img_fp.add(fp)
+
+        is_reused = ("reused_existing_chosen" in sel_title) or (sel_fallback == "reused")
+
+        if (not rel) or (not _es_imagen_valida(abs_path)) or is_placeholder or _es_placeholder_generado(abs_path) or is_dup or is_reused:
             faltantes.append(i)
             base_q = (
                 str(seg.get("image_query") or "").strip()
@@ -3671,11 +4574,75 @@ def renderizar_video_personalizado_desde_plan(
                 max_per_query=8,
                 segment_numbers=faltantes,
             )
+
+            def _normalizar_meta_seleccion(seg_idx_1: int, meta: Dict[str, Any]) -> Dict[str, Any]:
+                if not isinstance(meta, dict):
+                    return meta
+
+                seg_tag = f"seg_{int(seg_idx_1):02d}"
+                selected = meta.get("selected") if isinstance(meta.get("selected"), dict) else None
+
+                if selected:
+                    rel_sel = str(selected.get("path") or "").strip()
+                    abs_sel = os.path.join(carpeta_plan, rel_sel.replace("/", os.sep)) if rel_sel else ""
+                    if rel_sel and _es_imagen_valida(abs_sel) and not _es_placeholder_generado(abs_sel):
+                        return meta
+
+                cands = meta.get("candidates") if isinstance(meta.get("candidates"), list) else []
+                best: dict | None = None
+                best_abs: str | None = None
+                for c in cands:
+                    if not isinstance(c, dict):
+                        continue
+                    rel_c = str(c.get("path") or "").strip()
+                    abs_c = os.path.join(carpeta_plan, rel_c.replace("/", os.sep)) if rel_c else ""
+                    if not rel_c or (not _es_imagen_valida(abs_c)) or _es_placeholder_generado(abs_c):
+                        continue
+                    if (best is None) or (int(c.get("score") or 1) > int(best.get("score") or 1)):
+                        best = c
+                        best_abs = abs_c
+
+                if best and best_abs:
+                    ext = os.path.splitext(best_abs)[1].lower() or ".jpg"
+                    stable = os.path.join(carpeta_plan, f"{seg_tag}_chosen{ext}")
+                    final_abs = best_abs
+                    try:
+                        if os.path.abspath(best_abs) != os.path.abspath(stable):
+                            with open(best_abs, "rb") as src, open(stable, "wb") as dst:
+                                dst.write(src.read())
+                            final_abs = stable
+                    except Exception:
+                        pass
+
+                    rel_final = os.path.relpath(final_abs, carpeta_plan).replace("\\", "/")
+                    meta["selected"] = {
+                        "candidate_index": best.get("candidate_index"),
+                        "score": int(best.get("score") or 1),
+                        "url": best.get("url"),
+                        "title": str(best.get("title") or "auto_selected_from_candidates").strip(),
+                        "path": rel_final,
+                    }
+                    return meta
+
+                rec = _recuperar_candidato_local(carpeta_plan, seg_tag)
+                if rec and _es_imagen_valida(rec) and not _es_placeholder_generado(rec):
+                    rel_rec = os.path.relpath(rec, carpeta_plan).replace("\\", "/")
+                    meta["selected"] = {
+                        "candidate_index": None,
+                        "score": 1,
+                        "url": None,
+                        "title": "auto_recovered_local_candidate",
+                        "path": rel_rec,
+                    }
+                    meta["fallback"] = "recovered_local_candidate"
+                return meta
+
             for seg_idx_1, meta in zip(faltantes, metas):
                 if not isinstance(meta, dict):
                     continue
                 if not isinstance(segmentos[seg_idx_1 - 1], dict):
                     continue
+                meta = _normalizar_meta_seleccion(seg_idx_1, meta)
                 segmentos[seg_idx_1 - 1]["image_selection"] = meta
             plan["segments"] = segmentos
             with open(plan_file, "w", encoding="utf-8") as f:
@@ -3797,7 +4764,110 @@ def renderizar_video_personalizado_desde_plan(
                 "fallback": "reused",
             }
             return reused
+
+        try:
+            q_base = (
+                str(seg.get("image_query") or "").strip()
+                or str(seg.get("image_prompt") or "").strip()
+                or str(plan.get("brief") or "").strip()
+                or "photo"
+            )
+            note = str(seg.get("note") or "").strip()
+            q_fix = _build_better_image_query(
+                base_query=q_base,
+                text_es=str(seg.get("text_es") or ""),
+                note=note,
+                brief=str(plan.get("brief") or "").strip(),
+            )
+
+            rutas_fix, metas_fix = descargar_mejores_imagenes_ddg(
+                carpeta_plan,
+                [q_fix],
+                [note],
+                max_per_query=max(6, int(settings.custom_img_max_per_query)),
+                segment_numbers=[i_1],
+            )
+
+            if rutas_fix and _es_imagen_valida(rutas_fix[0]) and not _es_placeholder_generado(rutas_fix[0]):
+                fixed = rutas_fix[0]
+                rel = os.path.relpath(fixed, carpeta_plan).replace("\\", "/")
+                meta0 = metas_fix[0] if metas_fix else {}
+                selected0 = meta0.get("selected") if isinstance(meta0, dict) else None
+                seg["image_selection"] = {
+                    "query": str((meta0 or {}).get("query") or q_fix).strip() if isinstance(meta0, dict) else q_fix,
+                    "note": str((meta0 or {}).get("note") or note).strip() if isinstance(meta0, dict) else note,
+                    "candidates": (meta0.get("candidates") if isinstance(meta0, dict) else []) or [],
+                    "selected": {
+                        "candidate_index": (selected0 or {}).get("candidate_index") if isinstance(selected0, dict) else None,
+                        "score": int((selected0 or {}).get("score") or 1) if isinstance(selected0, dict) else 1,
+                        "url": (selected0 or {}).get("url") if isinstance(selected0, dict) else None,
+                        "title": str((selected0 or {}).get("title") or "web_autofix").strip() if isinstance(selected0, dict) else "web_autofix",
+                        "path": rel,
+                    },
+                    "fallback": "web_autofix",
+                }
+                return fixed
+
+            meta0 = metas_fix[0] if metas_fix else {}
+            cands0 = meta0.get("candidates") if isinstance(meta0, dict) else []
+            if isinstance(cands0, list) and cands0:
+                best = None
+                best_score = -1
+                for c in cands0:
+                    if not isinstance(c, dict):
+                        continue
+                    rel_c = str(c.get("path") or "").strip()
+                    abs_c = os.path.join(carpeta_plan, rel_c.replace("/", os.sep)) if rel_c else ""
+                    if not rel_c or (not _es_imagen_valida(abs_c)) or _es_placeholder_generado(abs_c):
+                        continue
+                    sc = int(c.get("score") or 1)
+                    if sc > best_score:
+                        best_score = sc
+                        best = (c, abs_c, rel_c)
+
+                if best:
+                    c_best, abs_best, rel_best = best
+                    seg["image_selection"] = {
+                        "query": str((meta0 or {}).get("query") or q_fix).strip(),
+                        "note": str((meta0 or {}).get("note") or note).strip(),
+                        "candidates": cands0,
+                        "selected": {
+                            "candidate_index": c_best.get("candidate_index"),
+                            "score": int(c_best.get("score") or 1),
+                            "url": c_best.get("url"),
+                            "title": str(c_best.get("title") or "web_autofix_best_available").strip(),
+                            "path": rel_best,
+                        },
+                        "fallback": "web_autofix_best_available",
+                    }
+                    return abs_best
+        except Exception:
+            pass
+
+        q_hint = str(seg.get("image_query") or seg.get("image_prompt") or plan.get("brief") or "").strip()
+        comfy = _intentar_fallback_comfy(carpeta_plan, seg_tag, q_hint)
+        if comfy and _es_imagen_valida(comfy) and not _es_placeholder_generado(comfy):
+            rel = os.path.relpath(comfy, carpeta_plan).replace("\\", "/")
+            q = str(seg.get("image_query") or seg.get("image_prompt") or "").strip()
+            note = str(seg.get("note") or "").strip()
+            seg["image_selection"] = {
+                "query": q,
+                "note": note,
+                "candidates": [],
+                "selected": {
+                    "candidate_index": None,
+                    "score": 1,
+                    "url": None,
+                    "title": "fallback_comfy_generated",
+                    "path": rel,
+                },
+                "fallback": "comfy",
+            }
+            return comfy
                                                                     
+        if not _ALLOW_PLACEHOLDER_IMAGES:
+            return None
+
         ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
         if ph:
             rel = os.path.relpath(ph, carpeta_plan).replace("\\", "/")
@@ -3818,6 +4888,14 @@ def renderizar_video_personalizado_desde_plan(
             }
             return ph
         return None
+
+    usados_fp_render: set[str] = set()
+
+    def _registrar_fp(path: str) -> None:
+        fp = _imagen_fingerprint(path)
+        if fp:
+            usados_fp_render.add(fp)
+
     for i, seg in enumerate(segmentos, start=1):
         sel = (seg.get("image_selection") or {}).get("selected") if isinstance(seg, dict) else None
         rel = (sel or {}).get("path") if isinstance(sel, dict) else None
@@ -3849,33 +4927,94 @@ def renderizar_video_personalizado_desde_plan(
                     abs_path = rep
 
         if (not _es_imagen_valida(abs_path)) or _es_placeholder_generado(abs_path):
-                                                                
             seg_tag = f"seg_{i:02d}"
-            ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
-            if not ph:
-                print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
+            q_hint = str(seg.get("image_query") or seg.get("image_prompt") or plan.get("brief") or "").strip()
+            comfy = _intentar_fallback_comfy(carpeta_plan, seg_tag, q_hint)
+            if comfy and _es_imagen_valida(comfy) and not _es_placeholder_generado(comfy):
+                rel_comfy = os.path.relpath(comfy, carpeta_plan).replace("\\", "/")
+                seg["image_selection"] = {
+                    "query": str(seg.get("image_query") or seg.get("image_prompt") or "").strip(),
+                    "note": str(seg.get("note") or "").strip(),
+                    "candidates": [],
+                    "selected": {
+                        "candidate_index": None,
+                        "score": 1,
+                        "url": None,
+                        "title": "fallback_comfy_replacing_invalid",
+                        "path": rel_comfy,
+                    },
+                    "fallback": "comfy",
+                }
+                try:
+                    plan["segments"] = segmentos
+                    with open(plan_file, "w", encoding="utf-8") as f:
+                        json.dump(plan, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+                abs_path = comfy
+            elif _ALLOW_PLACEHOLDER_IMAGES:
+                ph = _crear_placeholder_imagen(carpeta_plan, seg_tag)
+                if not ph:
+                    print(f"[CUSTOM] ❌ Imagen inválida/corrupta para segmento {i}: {abs_path}")
+                    return False
+                rel_ph = os.path.relpath(ph, carpeta_plan).replace("\\", "/")
+                seg["image_selection"] = {
+                    "query": str(seg.get("image_query") or seg.get("image_prompt") or "").strip(),
+                    "note": str(seg.get("note") or "").strip(),
+                    "candidates": [],
+                    "selected": {
+                        "candidate_index": None,
+                        "score": 1,
+                        "url": None,
+                        "title": "placeholder_replacing_invalid",
+                        "path": rel_ph,
+                    },
+                    "fallback": "placeholder",
+                }
+                try:
+                    plan["segments"] = segmentos
+                    with open(plan_file, "w", encoding="utf-8") as f:
+                        json.dump(plan, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+                abs_path = ph
+            else:
+                print(
+                    f"[CUSTOM] ❌ Segmento {i} sin imagen válida. "
+                    "Se aborta para evitar video con pantallas negras. "
+                    "(activa CUSTOM_ALLOW_PLACEHOLDER_IMAGES=1 para permitir placeholders)"
+                )
                 return False
-            rel_ph = os.path.relpath(ph, carpeta_plan).replace("\\", "/")
-            seg["image_selection"] = {
-                "query": str(seg.get("image_query") or seg.get("image_prompt") or "").strip(),
-                "note": str(seg.get("note") or "").strip(),
-                "candidates": [],
-                "selected": {
-                    "candidate_index": None,
-                    "score": 1,
-                    "url": None,
-                    "title": "placeholder_replacing_invalid",
-                    "path": rel_ph,
-                },
-                "fallback": "placeholder",
-            }
-            try:
-                plan["segments"] = segmentos
-                with open(plan_file, "w", encoding="utf-8") as f:
-                    json.dump(plan, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-            abs_path = ph
+
+        fp_cur = _imagen_fingerprint(abs_path)
+        if fp_cur and fp_cur in usados_fp_render:
+            seg_tag = f"seg_{i:02d}"
+            rep_unique = _recuperar_candidato_local_unico(carpeta_plan, seg_tag, usados_fp_render)
+            if rep_unique and _es_imagen_valida(rep_unique) and not _es_placeholder_generado(rep_unique):
+                rel_new = os.path.relpath(rep_unique, carpeta_plan).replace("\\", "/")
+                prev_meta = seg.get("image_selection") if isinstance(seg.get("image_selection"), dict) else {}
+                seg["image_selection"] = {
+                    "query": str(seg.get("image_query") or seg.get("image_prompt") or "").strip(),
+                    "note": str(seg.get("note") or "").strip(),
+                    "candidates": prev_meta.get("candidates") if isinstance(prev_meta, dict) else [],
+                    "selected": {
+                        "candidate_index": None,
+                        "score": 1,
+                        "url": None,
+                        "title": "recovered_unique_candidate",
+                        "path": rel_new,
+                    },
+                    "fallback": "unique_repair",
+                }
+                abs_path = rep_unique
+                try:
+                    plan["segments"] = segmentos
+                    with open(plan_file, "w", encoding="utf-8") as f:
+                        json.dump(plan, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
+
+        _registrar_fp(abs_path)
         imagenes.append(abs_path)
 
                                                        
@@ -4036,12 +5175,53 @@ def renderizar_video_personalizado_desde_plan(
     if not (0 < debug_min_seconds <= 10):
         debug_min_seconds = None
 
+    plan_min_seconds = plan.get("min_seconds") if isinstance(plan, dict) else None
+    plan_max_seconds = plan.get("max_seconds") if isinstance(plan, dict) else None
+    try:
+        plan_min_seconds = int(plan_min_seconds) if plan_min_seconds is not None else None
+    except Exception:
+        plan_min_seconds = None
+    try:
+        plan_max_seconds = int(plan_max_seconds) if plan_max_seconds is not None else None
+    except Exception:
+        plan_max_seconds = None
+
+    try:
+        default_short_min = int(settings.custom_min_video_sec or 40)
+    except Exception:
+        default_short_min = 40
+
+    # Compatibilidad: planes antiguos guardaban 60s por defecto en modo corto.
+    if plan_min_seconds is None:
+        plan_min_seconds = default_short_min
+    elif int(plan_min_seconds) == 60 and default_short_min == 40:
+        plan_min_seconds = 40
+
+    # En modo corto, fija rango 40-180 por defecto, conservando modo largo/debug.
+    if plan_min_seconds < 300:
+        if plan_min_seconds > 10 and plan_min_seconds < 40:
+            plan_min_seconds = 40
+        if plan_max_seconds is None:
+            plan_max_seconds = 180
+        else:
+            plan_max_seconds = min(int(plan_max_seconds), 180)
+
+    preserve_full_text = False
+    try:
+        raw_plan = plan.get("raw_plan") if isinstance(plan, dict) else None
+        preserve_full_text = bool((raw_plan or {}).get("preserved_source_text")) if isinstance(raw_plan, dict) else False
+    except Exception:
+        preserve_full_text = False
+
+    audio_min = debug_min_seconds if debug_min_seconds is not None else plan_min_seconds
+    audio_max = None if preserve_full_text else plan_max_seconds
+
     audio_final = combine_audios_with_silence(
         audios,
         carpeta_plan,
         gap_seconds=0,
-        min_seconds=debug_min_seconds,
-        max_seconds=None,
+        min_seconds=audio_min,
+        max_seconds=audio_max,
     )
     video_final = render_video_ffmpeg(imagenes, audio_final, carpeta_plan, tiempo_img=None, durations=duraciones)
 

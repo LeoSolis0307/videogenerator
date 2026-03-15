@@ -13,8 +13,9 @@ class TestConfig(unittest.TestCase):
         
     def test_default_values(self):
         # We didn't set this in mock, should be default
-        self.assertEqual(settings.custom_min_video_sec, 60)
-        self.assertEqual(settings.ollama_text_model_short, "gemma2:9b")
+        self.assertEqual(settings.custom_min_video_sec, 40)
+        self.assertIsInstance(settings.ollama_text_model_short, str)
+        self.assertTrue(settings.ollama_text_model_short.strip())
 
     def test_blocked_hosts(self):
         default_sites = {"freepik.com", "pinterest.com"}

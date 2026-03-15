@@ -4,10 +4,13 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 
-from core import custom_video, image_downloader, reddit_scraper, story_generator, text_processor, tts
+from core import custom_video, image_downloader, local_tts, reddit_scraper, reddit_story_importer, story_generator, text_processor, tts, voice_clone
+from core.cli_actions import CliActionContext, run_action_4, run_action_5, run_action_7, run_action_8, run_action_11
 from utils.fs import crear_carpeta_proyecto
 from core import topic_db
 from core.video_renderer import (
@@ -19,7 +22,7 @@ from core.video_renderer import (
     render_video_ffmpeg,
     select_video_base,
 )
-from utils.fs import crear_carpeta_proyecto, guardar_historial
+from utils.fs import guardar_historial
 from utils import topic_file
 from utils import topic_importer
 
@@ -46,6 +49,7 @@ HISTORIAS_GENEROS = {
     "2": "Terror y Paranormal",
     "3": "Venganza y Karens",
     "4": "Preguntas y Curiosidades",
+    "5": "Reddit Virales",
 }
 
 
@@ -177,6 +181,8 @@ def _filtrar_comentarios(comentarios, limite=200):
             continue
         if len(body) <= 80:
             continue
+        if not reddit_scraper.es_historia_narrativa(body, min_chars=900):
+            continue
         filtrados.append((body, cid))
         if len(filtrados) >= limite:
             break
@@ -232,6 +238,475 @@ def _seleccionar_genero() -> str:
 
 def _es_si(raw: str) -> bool:
     return (raw or "").strip().lower() in {"s", "si", "sí", "y", "yes", "1", "true"}
+
+
+def _es_error_gpu_bloqueante(exc: Exception) -> bool:
+    low = str(exc or "").strip().lower()
+    if not low:
+        return False
+    claves = (
+        "require_gpu",
+        "encoder gpu",
+        "h264_amf",
+        "gpu detectada pero el encode de prueba falló",
+        "ffmpeg no soporta el encoder gpu requerido",
+    )
+    return any(k in low for k in claves)
+
+
+def _separar_texto_max_chars(texto: str, *, max_chars: int = 498) -> str:
+    raw = (texto or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not raw:
+        return ""
+
+    max_chars = max(1, int(max_chars))
+    salida: list[str] = []
+
+    def _partir_texto_plano(s: str) -> list[str]:
+        s = (s or "").strip()
+        if not s:
+            return []
+        partes: list[str] = []
+        actual = ""
+        for palabra in s.split():
+            if len(palabra) > max_chars:
+                if actual:
+                    partes.append(actual)
+                    actual = ""
+                for i in range(0, len(palabra), max_chars):
+                    partes.append(palabra[i : i + max_chars])
+                continue
+
+            candidato = palabra if not actual else f"{actual} {palabra}"
+            if len(candidato) <= max_chars:
+                actual = candidato
+            else:
+                if actual:
+                    partes.append(actual)
+                actual = palabra
+
+        if actual:
+            partes.append(actual)
+        return partes
+
+    def _partir_parrafo(parrafo: str) -> list[str]:
+        p = (parrafo or "").strip()
+        if not p:
+            return []
+
+        oraciones = re.split(r'(?<=[.!?…])(?:["»”’)\]]+)?\s+', p)
+        oraciones = [o.strip() for o in oraciones if o.strip()]
+        if not oraciones:
+            return _partir_texto_plano(p)
+
+        partes: list[str] = []
+        actual = ""
+
+        for oracion in oraciones:
+            if len(oracion) > max_chars:
+                if actual:
+                    partes.append(actual)
+                    actual = ""
+                partes.extend(_partir_texto_plano(oracion))
+                continue
+
+            candidato = oracion if not actual else f"{actual} {oracion}"
+            if len(candidato) <= max_chars:
+                actual = candidato
+            else:
+                if actual:
+                    partes.append(actual)
+                actual = oracion
+
+        if actual:
+            partes.append(actual)
+        return partes
+
+    parrafos = [p for p in re.split(r"\n\s*\n", raw) if p.strip()]
+    for idx, parrafo in enumerate(parrafos):
+        lineas_parrafo = [ln.strip() for ln in parrafo.split("\n") if ln.strip()]
+        for linea in lineas_parrafo:
+            salida.extend(_partir_parrafo(linea))
+        if idx < len(parrafos) - 1 and salida and salida[-1] != "":
+            salida.append("")
+
+    return "\n".join(salida)
+
+
+def _accion_generar_voz_local() -> None:
+    print("\n[MAIN] Generar voz local (texto -> audio)")
+
+    modo = input("Fuente (1=pegar texto, 2=archivo .txt) [1]: ").strip()
+    texto = ""
+    if modo == "2":
+        ruta = input("Ruta del archivo .txt: ").strip().strip('"')
+        if not ruta or not os.path.exists(ruta):
+            print("[MAIN] ❌ Ruta inválida")
+            raise SystemExit(0)
+        try:
+            with open(ruta, "r", encoding="utf-8") as f:
+                texto = f.read()
+        except Exception as e:
+            print(f"[MAIN] ❌ No se pudo leer archivo: {e}")
+            raise SystemExit(0)
+    else:
+        texto_in = _pedir_texto_multiline("[MAIN] Pega el texto para voz local:")
+        if texto_in is None:
+            print("[MAIN] ❌ No se recibió texto")
+            raise SystemExit(0)
+        texto = texto_in
+
+    if not (texto or "").strip():
+        print("[MAIN] ❌ El texto está vacío")
+        raise SystemExit(0)
+
+    out_path = os.path.join("output", f"local_tts_{int(time.time())}.wav")
+
+    blocked_voices = set(getattr(local_tts, "KOKORO_BLOCKED_VOICES", set()) or set())
+    preferred_voices = [
+        v
+        for v in (getattr(local_tts, "KOKORO_PREFERRED_VOICES", []) or [])
+        if v and v not in blocked_voices
+    ]
+    default_voice = preferred_voices[0] if preferred_voices else "em_santa"
+
+    voice_options: list[tuple[str, str]] = [
+        ("santa", "em_santa"),
+        ("titan", "pm_santa"),
+        ("bella", "af_bella"),
+        ("heart", "af_heart"),
+        ("emma", "bf_emma"),
+        ("nicola", "im_nicola"),
+    ]
+    voice_options = [(alias, voice) for alias, voice in voice_options if voice in preferred_voices]
+    if not voice_options:
+        voice_options = [("santa", default_voice)]
+
+    print("[MAIN] Elige voz:")
+    for idx, (alias, _) in enumerate(voice_options, start=1):
+        print(f"  {idx}. {alias}")
+
+    default_index = 1
+    for idx, (_, voice) in enumerate(voice_options, start=1):
+        if voice == default_voice:
+            default_index = idx
+            break
+
+    voice_raw = input(f"Voz [{default_index}]: ").strip().lower()
+    selected_voice = default_voice
+    if voice_raw:
+        if voice_raw.isdigit():
+            sel_idx = int(voice_raw)
+            if 1 <= sel_idx <= len(voice_options):
+                selected_voice = voice_options[sel_idx - 1][1]
+        else:
+            by_alias = {alias.lower(): voice for alias, voice in voice_options}
+            if voice_raw in by_alias:
+                selected_voice = by_alias[voice_raw]
+            elif voice_raw in preferred_voices and voice_raw not in blocked_voices:
+                selected_voice = voice_raw
+
+    if selected_voice in blocked_voices:
+        print(f"[MAIN] ⚠️ Voz bloqueada ({selected_voice}). Usando '{default_voice}'.")
+        selected_voice = default_voice
+
+    kwargs = {
+        "text": texto,
+        "output_path": out_path,
+        "engine": "kokoro",
+        "kokoro_voice": selected_voice,
+        "timeout_s": 600,
+    }
+
+    try:
+        result = local_tts.synthesize_local_voice(**kwargs)
+        print(f"[MAIN] ✅ Audio generado: {result.output_path} (engine={result.engine})")
+    except Exception as e:
+        print(f"[MAIN] ❌ Error generando voz local: {e}")
+
+    raise SystemExit(0)
+
+
+def _accion_clonar_voz_local() -> None:
+    def _buscar_referencias_voz(*, max_items: int = 20) -> list[str]:
+        exts = {".wav", ".mp3", ".m4a"}
+        roots = [".", "storage", "output", "historias"]
+        skip_dirs = {".git", "__pycache__", ".venv", "venv", "node_modules", "site-packages", "dist-packages"}
+        cwd = os.path.abspath(os.getcwd())
+        keyword_tokens = {
+            "voz",
+            "voice",
+            "clone",
+            "clon",
+            "ref",
+            "referencia",
+            "sample",
+            "speaker",
+            "capcut",
+        }
+
+        def _should_skip_dir(name: str) -> bool:
+            low = (name or "").strip().lower()
+            if not low:
+                return True
+            if low in skip_dirs:
+                return True
+            # Exclude virtualenv folders with custom names like .venv-voiceclone.
+            if low.startswith(".venv") or low.endswith(".venv"):
+                return True
+            return False
+
+        def _is_render_audio(rel_path: str, stem: str) -> bool:
+            if rel_path.startswith("output/custom_"):
+                if stem == "audio_con_silencios":
+                    return True
+                if re.fullmatch(r"audio_\d+", stem):
+                    return True
+            if re.fullmatch(r"audio_\d+", stem):
+                return True
+            if "con_silencios" in stem:
+                return True
+            return False
+
+        ranked: list[tuple[int, float, str]] = []
+
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            for current_root, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if not _should_skip_dir(d)]
+                for fn in files:
+                    ext = os.path.splitext(fn)[1].lower()
+                    if ext not in exts:
+                        continue
+                    p = os.path.abspath(os.path.join(current_root, fn))
+                    rel = os.path.relpath(p, cwd).replace("\\", "/").lower()
+                    stem = os.path.splitext(fn)[0].strip().lower()
+                    if _is_render_audio(rel, stem):
+                        continue
+
+                    score = 0
+                    if any(tok in stem for tok in keyword_tokens):
+                        score += 4
+                    if any(tok in rel for tok in keyword_tokens):
+                        score += 2
+                    if rel.count("/") <= 1:
+                        score += 1
+                    if rel.startswith("output/"):
+                        score -= 1
+                    if score <= 0:
+                        continue
+
+                    try:
+                        mtime = os.path.getmtime(p)
+                    except Exception:
+                        mtime = 0.0
+                    ranked.append((score, mtime, p))
+
+        ranked.sort(key=lambda it: (it[0], it[1]), reverse=True)
+        unique: list[str] = []
+        seen: set[str] = set()
+        for _, _, p in ranked:
+            if p in seen:
+                continue
+            seen.add(p)
+            unique.append(p)
+            if len(unique) >= max(1, int(max_items)):
+                break
+        return unique
+
+    print("\n[MAIN] Texto a voz clonada (MODO CALIDAD MAXIMA)")
+    print("[MAIN] Paso 1/3: elige el audio de voz a clonar")
+
+    referencias = _buscar_referencias_voz(max_items=20)
+    ref_path = ""
+
+    if referencias:
+        print("[MAIN] Voces de referencia detectadas:")
+        for i, p in enumerate(referencias, start=1):
+            nombre = os.path.basename(p)
+            print(f"  {i}. {nombre}  ({p})")
+        raw_ref = input("Voz a clonar (número o ruta) [1]: ").strip().strip('"')
+        if not raw_ref:
+            ref_path = referencias[0]
+        elif raw_ref.isdigit() and 1 <= int(raw_ref) <= len(referencias):
+            ref_path = referencias[int(raw_ref) - 1]
+        else:
+            ref_path = raw_ref
+    else:
+        print("[MAIN] No encontré audios de voz en el proyecto. Puedes pegar la ruta manualmente.")
+        ref_path = input("Ruta del audio de voz (.wav/.mp3/.m4a): ").strip().strip('"')
+
+    if not ref_path or not os.path.exists(ref_path):
+        print("[MAIN] ❌ Ruta de referencia inválida")
+        raise SystemExit(0)
+
+    ref_ext = os.path.splitext(ref_path)[1].lower()
+    if ref_ext not in {".wav", ".mp3", ".m4a"}:
+        print("[MAIN] ❌ La referencia debe ser .wav, .mp3 o .m4a")
+        raise SystemExit(0)
+
+    print("[MAIN] Paso 2/3: escribe el texto que quieres escuchar con esa voz")
+    modo = input("Fuente de texto (1=pegar texto, 2=archivo .txt) [1]: ").strip()
+    texto = ""
+    if modo == "2":
+        ruta = input("Ruta del archivo .txt: ").strip().strip('"')
+        if not ruta or not os.path.exists(ruta):
+            print("[MAIN] ❌ Ruta inválida")
+            raise SystemExit(0)
+        try:
+            with open(ruta, "r", encoding="utf-8") as f:
+                texto = f.read()
+        except Exception as e:
+            print(f"[MAIN] ❌ No se pudo leer archivo: {e}")
+            raise SystemExit(0)
+    else:
+        texto_in = _pedir_texto_multiline("[MAIN] Pega el texto para texto-a-voz clonada:")
+        if texto_in is None:
+            print("[MAIN] ❌ No se recibió texto")
+            raise SystemExit(0)
+        texto = texto_in
+
+    if not (texto or "").strip():
+        print("[MAIN] ❌ El texto está vacío")
+        raise SystemExit(0)
+
+    out_path = os.path.join("output", f"voice_clone_hq_{int(time.time())}.wav")
+
+    print("[MAIN] Paso 3/3: opciones de generación (calidad máxima)")
+    idioma = (input("Idioma para TTS [es]: ").strip() or "es").lower()
+    force_cpu = True
+    print("[MAIN] Perfil aplicado: WAV + CPU + limpieza de silencios + referencia 30s + mejor tramo vocal.")
+
+    fallback_py = os.path.join(".venv-voiceclone", "Scripts", "python.exe")
+    try:
+        if os.path.exists(fallback_py):
+            tmp_text_path = ""
+            try:
+                with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", encoding="utf-8") as tf:
+                    tf.write(texto)
+                    tmp_text_path = tf.name
+
+                cmd = [
+                    os.path.abspath(fallback_py),
+                    "-m",
+                    "core.voice_clone",
+                    "--ref",
+                    os.path.abspath(ref_path),
+                    "--text-file",
+                    tmp_text_path,
+                    "--out",
+                    os.path.abspath(out_path),
+                    "--lang",
+                    idioma,
+                    "--timeout",
+                    "1800",
+                    "--ref-max-sec",
+                    "30",
+                    "--ref-trim-silence",
+                    "--ref-pick-best",
+                    "--cpu",
+                ]
+
+                run = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=1900,
+                )
+                out_msg = (run.stdout or "").strip()
+                err_msg = (run.stderr or "").strip()
+                if run.returncode == 0:
+                    if out_msg:
+                        print(out_msg)
+                    print("[MAIN] ✅ Texto-a-voz clonada completado usando .venv-voiceclone (MODO CALIDAD MAXIMA)")
+                    raise SystemExit(0)
+
+                if out_msg:
+                    print(out_msg)
+                if err_msg:
+                    print(f"[MAIN] ❌ STDERR: {err_msg[:500]}")
+                print("[MAIN] ⚠️ Falló .venv-voiceclone. Intentando fallback con entorno actual...")
+            finally:
+                if tmp_text_path and os.path.exists(tmp_text_path):
+                    try:
+                        os.remove(tmp_text_path)
+                    except Exception:
+                        pass
+
+        result = voice_clone.clone_voice_to_audio(
+            text=texto,
+            reference_audio_path=ref_path,
+            output_path=out_path,
+            language=idioma,
+            prefer_gpu=False,
+            timeout_s=1800,
+            reference_max_seconds=30,
+            reference_trim_silence=True,
+            reference_pick_best_segment=True,
+        )
+        print(
+            f"[MAIN] ✅ Texto-a-voz clonada completado: {result.output_path} "
+            f"(backend={result.backend}, model={result.model_name})"
+        )
+    except Exception as e:
+        print(f"[MAIN] ❌ Error en clonación de voz (modo calidad máxima): {e}")
+
+    raise SystemExit(0)
+
+
+def _preguntar_tts_render(*, voz_default: str, velocidad_default: str) -> tuple[str, str]:
+    render_velocidad = velocidad_default
+
+    default_kokoro_voice = "em_santa"
+    try:
+        default_kokoro_voice = str(local_tts._default_kokoro_voice()).strip() or "em_santa"
+    except Exception:
+        default_kokoro_voice = "em_santa"
+
+    kokoro_voices: list[str] = []
+    try:
+        if getattr(local_tts, "Kokoro", None) is not None:
+            model_path, voices_path = local_tts._ensure_kokoro_assets(timeout_s=300)
+            kk = local_tts.Kokoro(model_path, voices_path)
+            blocked = set(getattr(local_tts, "KOKORO_BLOCKED_VOICES", set()) or set())
+            raw = [str(v).strip() for v in (kk.get_voices() or []) if str(v).strip()]
+            filtered = [v for v in raw if v not in blocked]
+            preferred = list(getattr(local_tts, "KOKORO_PREFERRED_VOICES", []) or [])
+            pref_set = set(preferred)
+            kokoro_voices = sorted(filtered, key=lambda v: (v not in pref_set, preferred.index(v) if v in pref_set else 9999, v))
+    except Exception as e:
+        print(f"[MAIN] ⚠️ No se pudieron listar voces de Kokoro: {e}")
+        kokoro_voices = []
+
+    if kokoro_voices:
+        print("[MAIN] Voces Kokoro disponibles:")
+        for i, v in enumerate(kokoro_voices, start=1):
+            print(f"  {i}. {v}")
+
+    raw = input(
+        f"Voz Kokoro para render (número o nombre) [{default_kokoro_voice}]: "
+    ).strip()
+
+    if not raw:
+        render_voz = default_kokoro_voice
+    elif raw.isdigit() and kokoro_voices:
+        idx = int(raw)
+        if 1 <= idx <= len(kokoro_voices):
+            render_voz = kokoro_voices[idx - 1]
+        else:
+            render_voz = default_kokoro_voice
+    else:
+        render_voz = raw
+        low = raw.lower()
+        if kokoro_voices:
+            for v_name in kokoro_voices:
+                if low in v_name.lower():
+                    render_voz = v_name
+                    break
+
+    print(f"[MAIN] TTS elegido: voz='{render_voz}' | velocidad='{render_velocidad}'")
+    return render_voz, render_velocidad
 
 
 class _WindowsKeepAwake:
@@ -637,7 +1112,7 @@ def _generar_video(usar_video_base: bool, indice: int, total: int, *, usar_histo
     else:
         dur_est = _estimar_segundos(textos_es[0])
 
-    imagenes = image_downloader.descargar_imagenes_desde_prompts(carpeta, prompts, dur_audio=None)
+    imagenes = image_downloader.descargar_imagenes_desde_prompts(carpeta, prompts, dur_audio=dur_est)
     if not imagenes:
         print("[MAIN] No se descargaron imágenes")
         return False
@@ -666,6 +1141,8 @@ def _generar_video(usar_video_base: bool, indice: int, total: int, *, usar_histo
         try:
             video_final = render_video_base_con_audio(video_base_path, audio_final, carpeta, videos_dir=None)
         except Exception as e:
+            if _es_error_gpu_bloqueante(e):
+                raise
             print(f"[MAIN] Error renderizando con video base: {e}")
             return False
     else:
@@ -706,11 +1183,7 @@ def _generar_video(usar_video_base: bool, indice: int, total: int, *, usar_histo
     return True
 
 
-if __name__ == "__main__":
-    _configure_console_encoding()
-    print("[MAIN] Iniciando proceso")
-
-                                                                             
+def _bootstrap_topics_file() -> None:
     try:
         topic_file.ensure_topics_file(topic_file.TOPICS_FILE_DEFAULT)
         disponibles = topic_file.load_topics_available_with_flags(topic_file.TOPICS_FILE_DEFAULT)
@@ -720,8 +1193,8 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[MAIN] ⚠️ No se pudo leer temas_custom.txt: {e}")
 
-                                                                             
-                                                                                                     
+
+def _print_runtime_models_info() -> None:
     text_model = getattr(custom_video, "OLLAMA_TEXT_MODEL", "") or "(desconocido)"
     vision_model = (os.environ.get("VISION_MODEL") or "minicpm-v:latest").strip() or "minicpm-v:latest"
     ollama_url = (os.environ.get("OLLAMA_URL") or "http://localhost:11434/api/generate").strip()
@@ -729,493 +1202,212 @@ if __name__ == "__main__":
     print(f"[MAIN] Modelo visión: {vision_model} (env VISION_MODEL)")
     print(f"[MAIN] Ollama URL: {ollama_url} (env OLLAMA_URL)")
 
+
+def _accion_separar_texto_498() -> None:
+    texto = _pedir_texto_multiline("\n[MAIN] Separar texto en líneas de máximo 498 caracteres:")
+    if texto is None:
+        print("[MAIN] ❌ No se recibió texto.")
+        raise SystemExit(0)
+
+    resultado = _separar_texto_max_chars(texto, max_chars=498)
+    lineas = resultado.splitlines() if resultado else []
+    max_len = max((len(ln) for ln in lineas), default=0)
+    print("\n[MAIN] ✅ Texto separado (máximo 498 por línea):\n")
+    print(resultado)
+    print(f"\n[MAIN] Verificación -> líneas: {len(lineas)} | largo máximo: {max_len}")
+    raise SystemExit(0)
+
+
+def _leer_blob_import_temas() -> str:
+    modo = input("Fuente (1=pegar texto, 2=archivo .txt) [1]: ").strip()
+    if modo == "2":
+        ruta = input("Ruta del archivo .txt: ").strip().strip('"')
+        if not ruta or not os.path.exists(ruta):
+            print("[MAIN] Ruta inválida")
+            raise SystemExit(0)
+        try:
+            with open(ruta, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception as e:
+            print(f"[MAIN] No se pudo leer archivo: {e}")
+            raise SystemExit(0)
+
+    print("Pega el texto (multi-línea). Escribe END en una línea sola para terminar:")
+    lines: list[str] = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            break
+        if line.strip() == "END":
+            break
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _accion_importar_temas() -> None:
+    print("\n[MAIN] Importar temas a storage/temas_custom.txt")
+    blob = _leer_blob_import_temas()
+
+    prompts = topic_importer.parse_prompts_from_blob(blob)
+    if not prompts:
+        print("[MAIN] No se encontraron prompts.")
+        raise SystemExit(0)
+
+    aceptados, descartados = topic_importer.dedupe_prompts(prompts, topics_path=topic_file.TOPICS_FILE_DEFAULT)
+
+    if aceptados:
+        topic_file.append_topics([(p, False) for p in aceptados], path=topic_file.TOPICS_FILE_DEFAULT)
+
+    print(f"\n[MAIN] Agregados: {len(aceptados)}")
+    for i, p in enumerate(aceptados, start=1):
+        print(f"  + {i}. {p[:120]}")
+
+    print(f"\n[MAIN] Descartados: {len(descartados)}")
+    for i, (p, motivo) in enumerate(descartados, start=1):
+        print(f"  - {i}. ({motivo}) {p[:120]}")
+
+    if descartados:
+        sel = input(
+            "\n¿Quieres agregar alguno de los descartados de todos modos? (ej: 1,3,5 | Enter=skip): "
+        ).strip()
+        if sel:
+            idxs = _parse_indices_csv(sel, max_index=len(descartados))
+            if idxs:
+                force = [(descartados[i - 1][0], True) for i in idxs]
+                topic_file.append_topics(force, path=topic_file.TOPICS_FILE_DEFAULT)
+                print(f"[MAIN] Forzados agregados: {len(force)} (con prefijo '!')")
+
+    print(f"\n[MAIN] Listo. Archivo: {topic_file.TOPICS_FILE_DEFAULT}")
+    raise SystemExit(0)
+
+
+def _accion_importar_historias() -> None:
+    print("\n[MAIN] Importar historias virales de Reddit (filtro IA + no repetidas)")
+    total = _pedir_entero("¿Cuántas historias importar?: ", minimo=1, default=3)
+    try:
+        res = reddit_story_importer.importar_historias_reddit(total=total)
+    except Exception as e:
+        print(f"[MAIN] ❌ Error importando historias: {e}")
+        raise SystemExit(1)
+
+    print(
+        "[MAIN] Resultado importación -> "
+        f"solicitadas: {res.get('requested', 0)} | "
+        f"evaluadas por IA: {res.get('evaluated', 0)} | "
+        f"importadas: {res.get('imported', 0)}"
+    )
+
+    cache = res.get("cache") or {}
+    if isinstance(cache, dict):
+        print(
+            "[MAIN] Cache Reddit -> "
+            f"posts vistos: {cache.get('seen_posts', 0)} | "
+            f"comentarios vistos: {cache.get('seen_comments', 0)}"
+        )
+
+    for i, ruta in enumerate(res.get("saved", []) or [], start=1):
+        print(f"  {i}. {ruta}")
+
+    if res.get("reason"):
+        print(f"[MAIN] ℹ️ {res.get('reason')}")
+
+    print("[MAIN] Las historias quedaron en: historias/Reddit Virales")
+    raise SystemExit(0)
+
+
+def _accion_generar_textos() -> None:
+    total_textos = _pedir_entero("¿Cuántas historias generar?: ", minimo=1, default=1)
+    genero = _seleccionar_genero()
+    try:
+        resultados = story_generator.generar_historias(genero, total_textos)
+        print(f"[MAIN] Historias generadas: {len(resultados)}/{total_textos}")
+    except Exception as e:
+        print(f"[MAIN] ⚠️ Error generando historias: {e}")
+    raise SystemExit(0)
+
+
+def _accion_imagen_prueba() -> None:
+    prompt = input("Prompt para la imagen de prueba: ").strip()
+    carpeta_prueba = os.path.join("imagenes_prueba")
+    os.makedirs(carpeta_prueba, exist_ok=True)
+    try:
+        ruta = image_downloader.generar_imagen_prueba(prompt, carpeta_prueba)
+        if ruta:
+            print(f"[MAIN] ✅ Imagen guardada en: {ruta}")
+        else:
+            print("[MAIN] ❌ No se pudo generar la imagen de prueba")
+    except Exception as e:
+        print(f"[MAIN] ⚠️ Error generando imagen de prueba: {e}")
+    raise SystemExit(0)
+
+
+def _build_cli_action_context() -> CliActionContext:
+    return CliActionContext(
+        voz=VOZ,
+        velocidad=VELOCIDAD,
+        pedir_entero=_pedir_entero,
+        pedir_texto_multiline=_pedir_texto_multiline,
+        parse_indices_csv=_parse_indices_csv,
+        es_si=_es_si,
+        preguntar_tts_render=_preguntar_tts_render,
+        windows_keep_awake_cls=_WindowsKeepAwake,
+        es_error_gpu_bloqueante=_es_error_gpu_bloqueante,
+        custom_plans_pendientes=_custom_plans_pendientes,
+        custom_plans_todos=_custom_plans_todos,
+        custom_plan_flags=_custom_plan_flags,
+        finalizar_tema_custom_renderizado=_finalizar_tema_custom_renderizado,
+    )
+
+
+if __name__ == "__main__":
+    _configure_console_encoding()
+    print("[MAIN] Iniciando proceso")
+
+    _bootstrap_topics_file()
+    _print_runtime_models_info()
+
     accion = input(
-        "¿Qué deseas hacer? (1 = Videos, 2 = Textos, 3 = Imagen de prueba, 4 = Video personalizado, 5 = Renderizar personalizado, 6 = Importar temas, 7 = Reanudar último personalizado, 8 = Reanudar TODOS personalizados pendientes): "
+        "¿Qué deseas hacer? (1 = Videos, 2 = Textos, 3 = Imagen de prueba, 4 = Video personalizado [en 4.3: usa importadas de Reddit primero], 5 = Renderizar personalizado, 6 = Importar temas, 7 = Reanudar último personalizado, 8 = Reanudar TODOS personalizados pendientes, 9 = Separar texto en líneas de 498, 10 = Solo generar voz local, 11 = Mejorar planes personalizados, 12 = Importar historias, 13 = Texto a voz clonada desde audio): "
     ).strip()
 
+    if accion == "10":
+        _accion_generar_voz_local()
+
+    if accion == "13":
+        _accion_clonar_voz_local()
+
+    if accion == "9":
+        _accion_separar_texto_498()
+
     if accion == "6":
-        print("\n[MAIN] Importar temas a storage/temas_custom.txt")
-        modo = input("Fuente (1=pegar texto, 2=archivo .txt) [1]: ").strip()
-        blob = ""
-        if modo == "2":
-            ruta = input("Ruta del archivo .txt: ").strip().strip('"')
-            if not ruta or not os.path.exists(ruta):
-                print("[MAIN] Ruta inválida")
-                raise SystemExit(0)
-            try:
-                with open(ruta, "r", encoding="utf-8") as f:
-                    blob = f.read()
-            except Exception as e:
-                print(f"[MAIN] No se pudo leer archivo: {e}")
-                raise SystemExit(0)
-        else:
-            print("Pega el texto (multi-línea). Escribe END en una línea sola para terminar:")
-            lines: list[str] = []
-            while True:
-                try:
-                    line = input()
-                except EOFError:
-                    break
-                if line.strip() == "END":
-                    break
-                lines.append(line)
-            blob = "\n".join(lines)
-
-        prompts = topic_importer.parse_prompts_from_blob(blob)
-        if not prompts:
-            print("[MAIN] No se encontraron prompts.")
-            raise SystemExit(0)
-
-        aceptados, descartados = topic_importer.dedupe_prompts(prompts, topics_path=topic_file.TOPICS_FILE_DEFAULT)
-
-        if aceptados:
-            topic_file.append_topics([(p, False) for p in aceptados], path=topic_file.TOPICS_FILE_DEFAULT)
-
-        print(f"\n[MAIN] Agregados: {len(aceptados)}")
-        for i, p in enumerate(aceptados, start=1):
-            print(f"  + {i}. {p[:120]}")
-
-        print(f"\n[MAIN] Descartados: {len(descartados)}")
-        for i, (p, motivo) in enumerate(descartados, start=1):
-            print(f"  - {i}. ({motivo}) {p[:120]}")
-
-        if descartados:
-            sel = input(
-                "\n¿Quieres agregar alguno de los descartados de todos modos? (ej: 1,3,5 | Enter=skip): "
-            ).strip()
-            if sel:
-                idxs = _parse_indices_csv(sel, max_index=len(descartados))
-                if idxs:
-                    force = [(descartados[i - 1][0], True) for i in idxs]
-                    topic_file.append_topics(force, path=topic_file.TOPICS_FILE_DEFAULT)
-                    print(f"[MAIN] Forzados agregados: {len(force)} (con prefijo '!')")
-
-        print(f"\n[MAIN] Listo. Archivo: {topic_file.TOPICS_FILE_DEFAULT}")
-        raise SystemExit(0)
+        _accion_importar_temas()
 
     if accion == "2":
-        total_textos = _pedir_entero("¿Cuántas historias generar?: ", minimo=1, default=1)
-        genero = _seleccionar_genero()
-        try:
-            resultados = story_generator.generar_historias(genero, total_textos)
-            print(f"[MAIN] Historias generadas: {len(resultados)}/{total_textos}")
-        except Exception as e:
-            print(f"[MAIN] ⚠️ Error generando historias: {e}")
-        raise SystemExit(0)
+        _accion_generar_textos()
 
     if accion == "3":
-        prompt = input("Prompt para la imagen de prueba: ").strip()
-        carpeta_prueba = os.path.join("imagenes_prueba")
-        os.makedirs(carpeta_prueba, exist_ok=True)
-        try:
-            ruta = image_downloader.generar_imagen_prueba(prompt, carpeta_prueba)
-            if ruta:
-                print(f"[MAIN] ✅ Imagen guardada en: {ruta}")
-            else:
-                print("[MAIN] ❌ No se pudo generar la imagen de prueba")
-        except Exception as e:
-            print(f"[MAIN] ⚠️ Error generando imagen de prueba: {e}")
-        raise SystemExit(0)
+        _accion_imagen_prueba()
+
+    ctx = _build_cli_action_context()
 
     if accion == "4":
-        origen_temas = input("Temas (1=escribir, 2=archivo storage/temas_custom.txt) [1]: ").strip()
-
-        temas_path = topic_file.TOPICS_FILE_DEFAULT
-        temas_disponibles: list[tuple[str, bool]] = []
-        if origen_temas == "2":
-            topic_file.ensure_topics_file(temas_path)
-            temas_disponibles = topic_file.load_topics_available_with_flags(temas_path)
-            if not temas_disponibles:
-                print(f"[MAIN] No hay temas disponibles en {temas_path} (sin prefijo '0').")
-                print("[MAIN] Agrega 1 tema por línea en el archivo y vuelve a intentar.")
-                raise SystemExit(0)
-            print("[MAIN] Revisando temas repetidos contra la DB...")
-            elegibles: list[tuple[str, bool]] = []
-            repetidos = 0
-            for tema, forced in temas_disponibles:
-                brief = (tema or "").strip()
-                if not brief:
-                    continue
-                if forced:
-                    elegibles.append((brief, True))
-                    continue
-                try:
-                    match = topic_db.find_similar_topic(brief, kinds=("custom", "custom_pending"), threshold=0.90)
-                except Exception:
-                    match = None
-                if match is not None:
-                    repetidos += 1
-                    continue
-                elegibles.append((brief, False))
-
-            print(
-                f"[MAIN] Temas: {len(temas_disponibles)} | Elegibles (no repetidos): {len(elegibles)} | Repetidos: {repetidos}"
-            )
-            if not elegibles:
-                print("[MAIN] No hay temas elegibles (todos parecen repetidos).")
-                raise SystemExit(0)
-
-            max_n = len(elegibles)
-            total_custom = _pedir_entero(f"¿Cuántos videos sacar del archivo? (max {max_n}): ", minimo=1, default=1)
-            total_custom = min(total_custom, max_n)
-            temas_disponibles = elegibles
-        else:
-            total_custom = _pedir_entero("¿Cuántos videos personalizados quieres crear?: ", minimo=1, default=1)
-
-        dur_opt = input("Duración mínima para TODOS (1=1 minuto, 2=5 minutos, 3=debug 5 segundos) [1]: ").strip()
-        if dur_opt == "2":
-            min_seconds = 300
-        elif dur_opt == "3":
-            min_seconds = 5
-            print("[MAIN] 🧪 Modo debug rápido activado: objetivo ~5 segundos para validar pipeline.")
-        else:
-            min_seconds = 60
-
-        sel_all = input("¿Quieres elegir manualmente las imágenes para TODOS los videos? (s/N): ").strip().lower()
-        seleccionar_imagenes_all = sel_all == "s"
-
-        auto_render_after_plans = _es_si(input("¿Al terminar los guiones/planes, renderizar automáticamente? (s/N): "))
-        unload_text_model_after_plans = False
-        if auto_render_after_plans:
-            unload_text_model_after_plans = _es_si(
-                input("¿Intentar descargar/unload el modelo de texto al terminar guiones? (s/N): ")
-            )
-
-                                                                           
-        briefs: list[str] = []
-        seleccionar_flags: list[bool] = []
-        brief_topic_files: list[str | None] = []
-
-        def _tema_repetido(brief: str) -> bool:
-            try:
-                                                                         
-                match = topic_db.find_similar_topic(brief, kinds=("custom", "custom_pending"))
-            except Exception as e:
-                print(f"[MAIN] ⚠️ No se pudo validar tema en DB: {e}")
-                match = None
-            if match is None:
-                return False
-            print(
-                "[MAIN] ⚠️ Tema repetido detectado. "
-                f"(sim={match.similarity:.2f}) Ya existe algo muy parecido: '{match.brief[:120]}'"
-            )
-            return True
-
-        print("\n[MAIN] Selección de temas...")
-        if origen_temas == "2":
-                                                                              
-            i = 0
-            for tema, forced in temas_disponibles:
-                if len(briefs) >= total_custom:
-                    break
-                i += 1
-                brief = (tema or "").strip()
-                if not brief:
-                    continue
-                if not forced and _tema_repetido(brief):
-                    continue
-
-                seleccionar_imagenes = seleccionar_imagenes_all
-
-                briefs.append(brief)
-                seleccionar_flags.append(seleccionar_imagenes)
-                brief_topic_files.append(temas_path)
-
-            if len(briefs) < total_custom:
-                print(
-                    f"[MAIN] ⚠️ Solo se pudieron tomar {len(briefs)}/{total_custom} temas del archivo "
-                    "(los demás se saltaron por repetidos)."
-                )
-                if not briefs:
-                    raise SystemExit(0)
-        else:
-            print("[MAIN] Ingresa los prompts de cada historia (luego comenzará el render).")
-            for i in range(1, total_custom + 1):
-                while True:
-                    brief = _pedir_texto_multiline(f"Prompt/Tema para la historia {i}/{total_custom}:")
-                    if brief is None:
-                        print("[MAIN] ❌ Entrada finalizada (EOF) antes de capturar el prompt. Abortando para evitar bucle.")
-                        raise SystemExit(1)
-                    if not brief:
-                        print("[MAIN] ⚠️ El prompt no puede estar vacío.")
-                        continue
-                    if _tema_repetido(brief):
-                        print("[MAIN] Escribe otro tema para evitar repetir videos.")
-                        continue
-                    break
-
-                seleccionar_imagenes = seleccionar_imagenes_all
-
-                briefs.append(brief)
-                seleccionar_flags.append(seleccionar_imagenes)
-                brief_topic_files.append(None)
-
-        print("\n[MAIN] Fase 1: generando SOLO guiones/planes (sin imágenes, sin render)...")
-
-                                                                                 
-        if min_seconds <= 10:
-            print("[MAIN] ℹ️ Modo debug 5s: se omite preflight del LLM de texto.")
-        else:
-            try:
-                if not custom_video.check_text_llm_ready():
-                    print("[MAIN] ❌ Abortando Fase 1: el LLM de texto no está disponible en Ollama.")
-                    print("[MAIN] 💡 Tip (Gemma 2): instala uno más liviano y úsalo para guiones:")
-                    print("[MAIN]   - `ollama pull gemma2:2b`  (recomendado para PCs con poca RAM)")
-                    print("[MAIN]   - `setx OLLAMA_TEXT_MODEL gemma2:2b`  (abre una nueva terminal luego)")
-                    raise SystemExit(1)
-            except SystemExit:
-                raise
-            except Exception as e:
-                print(f"[MAIN] ❌ Abortando Fase 1: fallo el preflight de Ollama: {e}")
-                raise SystemExit(1)
-
-        creados = 0
-        planes_creados: list[str] = []
-        for i, (brief, seleccionar_imagenes, tema_file) in enumerate(
-            zip(briefs, seleccionar_flags, brief_topic_files), start=1
-        ):
-            try:
-                carpeta = custom_video.generar_guion_personalizado_a_plan(
-                    brief,
-                    min_seconds=min_seconds,
-                    seleccionar_imagenes=seleccionar_imagenes,
-                )
-                if carpeta:
-                                                                                                
-                    try:
-                        topic_db.register_topic_if_new(brief, kind="custom_pending", plan_dir=carpeta, threshold=0.90)
-                    except Exception as e:
-                        print(f"[MAIN] ⚠️ No se pudo registrar tema pendiente en DB: {e}")
-
-                                                                                
-                    try:
-                        plan_path = os.path.join(carpeta, "custom_plan.json")
-                        if os.path.exists(plan_path):
-                            with open(plan_path, "r", encoding="utf-8") as f:
-                                plan = json.load(f) or {}
-                            if tema_file:
-                                plan["topic_source"] = "file"
-                                plan["topic_file"] = tema_file
-                            else:
-                                plan["topic_source"] = "manual"
-                            with open(plan_path, "w", encoding="utf-8") as f:
-                                json.dump(plan, f, ensure_ascii=False, indent=2)
-                    except Exception as e:
-                        print(f"[MAIN] ⚠️ No se pudo guardar metadata del tema: {e}")
-                    creados += 1
-                    planes_creados.append(carpeta)
-                    print(f"[MAIN] ✅ Plan creado {i}/{total_custom}: {carpeta}")
-                else:
-                    print(f"[MAIN] ❌ No se pudo crear plan {i}/{total_custom}")
-            except Exception as e:
-                print(f"[MAIN] ⚠️ Error creando plan (historia {i}/{total_custom}): {e}")
-
-        print(f"[MAIN] Planes creados: {creados}/{total_custom}")
-
-        if auto_render_after_plans and planes_creados:
-            if unload_text_model_after_plans:
-                try:
-                    ok = custom_video.intentar_descargar_modelo_texto()
-                    print("[MAIN] Unload modelo texto:", "OK" if ok else "No se pudo / no aplica")
-                except Exception as e:
-                    print(f"[MAIN] No se pudo intentar unload: {e}")
-
-            exitos = 0
-            try:
-                with _WindowsKeepAwake(enabled=True):
-                    for k, ruta in enumerate(planes_creados, start=1):
-                        try:
-                            ok = custom_video.renderizar_video_personalizado_desde_plan(
-                                ruta,
-                                voz=VOZ,
-                                velocidad=VELOCIDAD,
-                                interactive=False,
-                            )
-                            if ok:
-                                exitos += 1
-                            print(f"[MAIN] Render {k}/{len(planes_creados)}:", "OK" if ok else "FAIL")
-                        except Exception as e:
-                            print(f"[MAIN] Error renderizando (plan {k}): {e}")
-            except KeyboardInterrupt:
-                print("\n[MAIN] Interrumpido por el usuario.")
-                raise SystemExit(0)
-
-            print(f"[MAIN] Renders completados: {exitos}/{len(planes_creados)}")
-            raise SystemExit(0)
-        descargar = input("¿Quieres intentar descargar el modelo de texto para liberar VRAM? (s/N): ").strip().lower()
-        if descargar == "s":
-            try:
-                ok = custom_video.intentar_descargar_modelo_texto()
-                print("[MAIN] Unload modelo texto:", "✅ OK" if ok else "❌ No se pudo / no aplica")
-            except Exception as e:
-                print(f"[MAIN] ⚠️ No se pudo intentar unload: {e}")
-
-        print("[MAIN] Ahora usa la opción 5 para Fase 2 (imágenes+render) desde el plan.")
-        raise SystemExit(0)
+        run_action_4(ctx)
 
     if accion == "5":
-        planes = _custom_plans_pendientes()
-        mostrando_todos = False
-        if not planes:
-            planes = _custom_plans_todos()
-            mostrando_todos = bool(planes)
-        if planes:
-            if mostrando_todos:
-                print("\n[MAIN] No hay pendientes; mostrando todos los planes personalizados:")
-            else:
-                print("\n[MAIN] Planes personalizados disponibles:")
-            for i, p in enumerate(planes, start=1):
-                print(f"  {i}. {p}")
-
-            total_renders = _pedir_entero("¿Cuántos renders quieres hacer?: ", minimo=1, default=1)
-            sel_raw = input("Selecciona planes (ej: 1,2,3) [1]: ").strip()
-            seleccion = _parse_indices_csv(sel_raw, max_index=len(planes))
-            if not seleccion:
-                seleccion = [1]
-
-                                                                                           
-            if total_renders > len(seleccion):
-                for j in range(1, len(planes) + 1):
-                    if j in seleccion:
-                        continue
-                    seleccion.append(j)
-                    if len(seleccion) >= total_renders:
-                        break
-
-                                                                 
-            seleccion = seleccion[:total_renders]
-
-            exitos = 0
-            interactive_mode = len(seleccion) <= 1
-
-            try:
-                with _WindowsKeepAwake(enabled=True):
-                    for k, idx in enumerate(seleccion, start=1):
-                        ruta = planes[idx - 1]
-                        try:
-                            ok = custom_video.renderizar_video_personalizado_desde_plan(
-                                ruta,
-                                voz=VOZ,
-                                velocidad=VELOCIDAD,
-                                interactive=interactive_mode,
-                            )
-                            if ok:
-                                exitos += 1
-
-                            if ok:
-                                _finalizar_tema_custom_renderizado(ruta)
-
-                            print(
-                                f"[MAIN] Render {k}/{len(seleccion)} (plan {idx}):",
-                                "✅ Exito" if ok else "❌ Falló",
-                            )
-                        except Exception as e:
-                            print(f"[MAIN] ⚠️ Error renderizando (plan {idx}): {e}")
-            except KeyboardInterrupt:
-                print("\n[MAIN] Interrumpido por el usuario.")
-                raise SystemExit(0)
-
-            print(f"[MAIN] Renders completados: {exitos}/{len(seleccion)}")
-            raise SystemExit(0)
-        else:
-            raw = input("Rutas (separadas por coma) de carpeta output/custom_... o custom_plan.json: ").strip().strip('"')
-            if not raw:
-                print("[MAIN] No se encontraron planes custom y no se indicó ruta")
-                raise SystemExit(0)
-
-            rutas = [r.strip().strip('"') for r in raw.split(",") if r.strip().strip('"')]
-            total_renders = len(rutas)
-            exitos = 0
-            for i, ruta in enumerate(rutas, start=1):
-                try:
-                    ok = custom_video.renderizar_video_personalizado_desde_plan(
-                        ruta,
-                        voz=VOZ,
-                        velocidad=VELOCIDAD,
-                        interactive=(len(rutas) <= 1),
-                    )
-                    if ok:
-                        exitos += 1
-                        ruta_plan = os.path.abspath(ruta)
-                        plan_dir = ruta_plan if os.path.isdir(ruta_plan) else os.path.dirname(ruta_plan)
-                        _finalizar_tema_custom_renderizado(plan_dir)
-                    print(f"[MAIN] Render {i}/{total_renders}:", "✅ Exito" if ok else "❌ Falló")
-                except Exception as e:
-                    print(f"[MAIN] ⚠️ Error renderizando ({ruta}): {e}")
-
-            print(f"[MAIN] Renders completados: {exitos}/{total_renders}")
-            raise SystemExit(0)
+        run_action_5(ctx)
 
     if accion == "7":
-        planes = _custom_plans_pendientes()
-        if not planes:
-            print("[MAIN] No hay planes personalizados pendientes para reanudar.")
-            raise SystemExit(0)
-
-        ruta = planes[0]
-        print(f"[MAIN] Reanudando último plan personalizado pendiente: {ruta}")
-        try:
-            flags = _custom_plan_flags(ruta)
-            if flags.get("rendered"):
-                _finalizar_tema_custom_renderizado(ruta)
-                print("[MAIN] Reanudación: ✅ Ya estaba renderizado; solo se finalizó.")
-            else:
-                with _WindowsKeepAwake(enabled=True):
-                    ok = custom_video.renderizar_video_personalizado_desde_plan(
-                        ruta,
-                        voz=VOZ,
-                        velocidad=VELOCIDAD,
-                        interactive=False,
-                    )
-                if ok:
-                    _finalizar_tema_custom_renderizado(ruta)
-                print("[MAIN] Reanudación:", "✅ Exito" if ok else "❌ Falló")
-        except KeyboardInterrupt:
-            print("\n[MAIN] Interrumpido por el usuario.")
-            raise SystemExit(0)
-        except Exception as e:
-            print(f"[MAIN] ⚠️ Error reanudando último plan: {e}")
-            raise SystemExit(0)
-
-        raise SystemExit(0)
+        run_action_7(ctx)
 
     if accion == "8":
-        planes = _custom_plans_pendientes()
-        if not planes:
-            print("[MAIN] No hay planes personalizados pendientes.")
-            raise SystemExit(0)
+        run_action_8(ctx)
 
-        print(f"[MAIN] Reanudando cola de personalizados pendientes: {len(planes)}")
-        exitos = 0
-        try:
-            with _WindowsKeepAwake(enabled=True):
-                for i, ruta in enumerate(planes, start=1):
-                    try:
-                        flags = _custom_plan_flags(ruta)
-                        if flags.get("rendered"):
-                            _finalizar_tema_custom_renderizado(ruta)
-                            exitos += 1
-                            print(f"[MAIN] {i}/{len(planes)}: ✅ Ya renderizado; finalizado: {ruta}")
-                            continue
+    if accion == "11":
+        run_action_11(ctx)
 
-                        ok = custom_video.renderizar_video_personalizado_desde_plan(
-                            ruta,
-                            voz=VOZ,
-                            velocidad=VELOCIDAD,
-                            interactive=False,
-                        )
-                        if ok:
-                            _finalizar_tema_custom_renderizado(ruta)
-                            exitos += 1
-                        print(f"[MAIN] {i}/{len(planes)}:", "✅ Exito" if ok else "❌ Falló", f"| {ruta}")
-                    except Exception as e:
-                        print(f"[MAIN] ⚠️ Error en cola (item {i}/{len(planes)}): {e}")
-        except KeyboardInterrupt:
-            print("\n[MAIN] Interrumpido por el usuario.")
-            raise SystemExit(0)
-
-        print(f"[MAIN] Cola completada: {exitos}/{len(planes)}")
-        raise SystemExit(0)
+    if accion == "12":
+        _accion_importar_historias()
 
                     
     fase = _pedir_entero("Selecciona fase (1=plan, 2=render pendientes): ", minimo=1, default=2)
@@ -1264,5 +1456,8 @@ if __name__ == "__main__":
             ):
                 exitos += 1
         except Exception as e:
+            if _es_error_gpu_bloqueante(e):
+                print(f"[MAIN] ❌ Render detenido por requisito GPU: {e}")
+                raise SystemExit(1)
             print(f"[MAIN] ⚠️ Error inesperado en video {i+1}/{total_videos}: {e}")
     print(f"[MAIN] Finalizado: {exitos}/{total_videos} operaciones completadas con éxito")

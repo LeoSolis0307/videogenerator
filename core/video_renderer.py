@@ -3,9 +3,11 @@ import math
 import os
 import random
 import re
+import shlex
 import subprocess
 import wave
 import shutil
+from functools import lru_cache
 
 import imageio_ffmpeg
 from core.config import settings
@@ -17,6 +19,23 @@ MIN_VIDEO_SEC = 15 * 60
 MAX_VIDEO_SEC = 30 * 60
 DEFAULT_VIDEOS_DIR = r"C:\Users\Leonardo\Downloads\video\media"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+_GPU_CODEC_HINTS = {
+    "h264_amf",
+    "hevc_amf",
+    "av1_amf",
+    "h264_nvenc",
+    "hevc_nvenc",
+    "av1_nvenc",
+    "h264_qsv",
+    "hevc_qsv",
+    "av1_qsv",
+    "h264_vaapi",
+    "hevc_vaapi",
+    "h264_videotoolbox",
+    "hevc_videotoolbox",
+}
+_GPU_PRECHECK_OK: bool | None = None
+_GPU_PRECHECK_MSG: str = ""
 
                                               
                                                                                
@@ -59,8 +78,13 @@ def _encoding_cfg() -> dict:
     if not fps:
         fps = "25"
 
+    codec = (settings.video_codec or "libx264").strip() or "libx264"
+    codec_args = str(settings.video_codec_args or "").strip()
+
     return {
         "quality": quality,
+        "codec": codec,
+        "codec_args": codec_args,
         "preset": _opt_str(preset) or "veryfast",
         "crf": _opt_str(crf) or "20",
         "fps": _opt_str(fps) or "25",
@@ -68,6 +92,119 @@ def _encoding_cfg() -> dict:
         "scale_flags": _opt_str(scale_flags),
         "tune": _opt_str(tune),
     }
+
+
+def _build_video_codec_args(cfg: dict) -> list[str]:
+    codec = (cfg.get("codec") or "libx264").strip() or "libx264"
+    extra_raw = (cfg.get("codec_args") or "").strip()
+    args = ["-c:v", codec]
+
+    if codec == "libx264":
+        args.extend(["-preset", cfg["preset"], "-crf", cfg["crf"]])
+        if cfg.get("tune"):
+            args.extend(["-tune", cfg["tune"]])
+    elif extra_raw:
+        try:
+            args.extend(shlex.split(extra_raw, posix=False))
+        except Exception:
+            print(f"[VIDEO] WARNING: VIDEO_CODEC_ARGS inválido, ignorando: {extra_raw}")
+
+    return args
+
+
+def _is_gpu_codec(codec: str) -> bool:
+    c = (codec or "").strip().lower()
+    if not c:
+        return False
+    if c in _GPU_CODEC_HINTS:
+        return True
+    return any(x in c for x in ("_amf", "_nvenc", "_qsv", "_vaapi", "videotoolbox"))
+
+
+@lru_cache(maxsize=4)
+def _ffmpeg_encoders_text(ffmpeg: str) -> str:
+    r = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        out = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()
+        raise RuntimeError(f"No se pudo listar encoders de FFmpeg: {out[:500]}")
+    return (r.stdout or "") + "\n" + (r.stderr or "")
+
+
+def _ffmpeg_has_encoder(ffmpeg: str, codec: str) -> bool:
+    if not codec:
+        return False
+    text = _ffmpeg_encoders_text(ffmpeg).lower()
+    needle = codec.strip().lower()
+    return f" {needle}" in text or f"{needle} " in text or f"{needle}\n" in text
+
+
+def _probe_gpu_encode_or_raise(ffmpeg: str, cfg: dict) -> None:
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=128x128:r=24",
+        "-frames:v",
+        "24",
+    ]
+    cmd.extend(_build_video_codec_args(cfg))
+    cmd.extend([
+        "-pix_fmt",
+        "yuv420p",
+        "-f",
+        "null",
+        "-",
+    ])
+
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    if r.returncode != 0:
+        detail = ((r.stderr or "") + "\n" + (r.stdout or "")).strip()[:900]
+        raise RuntimeError(
+            "GPU detectada pero el encode de prueba falló. "
+            f"Codec={cfg.get('codec')} | Detalle FFmpeg: {detail}"
+        )
+
+
+def _ensure_gpu_precheck() -> None:
+    global _GPU_PRECHECK_OK, _GPU_PRECHECK_MSG
+    if _GPU_PRECHECK_OK is True:
+        return
+    if _GPU_PRECHECK_OK is False:
+        raise RuntimeError(_GPU_PRECHECK_MSG)
+
+    cfg = _encoding_cfg()
+    codec = (cfg.get("codec") or "").strip().lower()
+
+    if not settings.require_gpu:
+        _GPU_PRECHECK_OK = True
+        _GPU_PRECHECK_MSG = ""
+        return
+
+    if not _is_gpu_codec(codec):
+        _GPU_PRECHECK_OK = False
+        _GPU_PRECHECK_MSG = (
+            "REQUIRE_GPU=1 exige un codec de GPU, pero VIDEO_CODEC actual no es de GPU: "
+            f"'{codec or 'vacío'}'. Usa VIDEO_CODEC=h264_amf (AMD) o desactiva REQUIRE_GPU=0."
+        )
+        raise RuntimeError(_GPU_PRECHECK_MSG)
+
+    ffmpeg = _pick_ffmpeg()
+    if not _ffmpeg_has_encoder(ffmpeg, codec):
+        _GPU_PRECHECK_OK = False
+        _GPU_PRECHECK_MSG = (
+            f"FFmpeg no soporta el encoder GPU requerido '{codec}'. "
+            "Actualiza FFmpeg/driver AMD o cambia VIDEO_CODEC a un encoder GPU disponible."
+        )
+        raise RuntimeError(_GPU_PRECHECK_MSG)
+
+    _probe_gpu_encode_or_raise(ffmpeg, cfg)
+    _GPU_PRECHECK_OK = True
+    _GPU_PRECHECK_MSG = ""
 
 
 def _scale_filter(size: int) -> str:
@@ -151,6 +288,7 @@ def _build_per_stream_filters(idx: int, fps: str, dur_val: float, size: int = 76
     return parts
 
 
+@lru_cache(maxsize=1)
 def _pick_ffmpeg() -> str:
     env_bin = os.environ.get("FFMPEG_BIN")
     if env_bin:
@@ -551,6 +689,7 @@ def _calc_speed_and_padding(video_dur: float, audio_dur: float, *, max_speed: fl
 
 
 def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida: str, *, videos_dir: str | None = None):
+    _ensure_gpu_precheck()
     ffmpeg = _pick_ffmpeg()
 
     video_fs = video_path or _pick_video_file(videos_dir)
@@ -598,14 +737,9 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
         "[v0]",
         "-map",
         "1:a",
-        "-c:v",
-        "libx264",
-        "-preset",
-        cfg["preset"],
-        "-crf",
-        cfg["crf"],
-        "-tune",
-        "film",
+    ]
+    cmd.extend(_build_video_codec_args(cfg))
+    cmd.extend([
         "-pix_fmt",
         "yuv420p",
         "-c:a",
@@ -615,7 +749,7 @@ def render_video_base_con_audio(video_path: str, audio_path: str, carpeta_salida
         "-movflags",
         "+faststart",
         _ffmpeg_path(salida),
-    ]
+    ])
 
     if cfg.get("audio_bitrate"):
         cmd.insert(cmd.index("-movflags"), "-b:a")
@@ -735,6 +869,7 @@ def combine_audios_with_silence(audios, carpeta, gap_seconds=4, *, min_seconds: 
 
 
 def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=None):
+    _ensure_gpu_precheck()
     print("[VIDEO] Preparando render con FFmpeg (imageio)...")
 
     if not imagenes:
@@ -904,39 +1039,29 @@ def render_video_ffmpeg(imagenes, audio, carpeta, tiempo_img=None, *, durations=
 
     salida = os.path.join(carpeta_abs, "Video_Final.mp4")
 
-    cmd = (
-        inputs
-        + [
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            last_video_label,
-            "-map",
-            f"{audio_input_index}:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            cfg["preset"],
-            "-crf",
-            cfg["crf"],
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            fps,
-            "-c:a",
-            "aac",
-            "-ar",
-            "48000",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            _ffmpeg_path(salida),
-        ]
-    )
-
-    if cfg.get("tune"):
-        cmd.insert(cmd.index("-pix_fmt"), "-tune")
-        cmd.insert(cmd.index("-pix_fmt"), cfg["tune"])
+    cmd = inputs + [
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        last_video_label,
+        "-map",
+        f"{audio_input_index}:a:0",
+    ]
+    cmd.extend(_build_video_codec_args(cfg))
+    cmd.extend([
+        "-pix_fmt",
+        "yuv420p",
+        "-r",
+        fps,
+        "-c:a",
+        "aac",
+        "-ar",
+        "48000",
+        "-movflags",
+        "+faststart",
+        "-shortest",
+        _ffmpeg_path(salida),
+    ])
 
     if cfg.get("audio_bitrate"):
         cmd.insert(cmd.index("-movflags"), "-b:a")
@@ -988,6 +1113,7 @@ def _slugify_title(title: str | None) -> str:
 
 
 def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_path=None, title_text=None):
+    _ensure_gpu_precheck()
     print("[VIDEO] Preparando concatenación con intro...")
 
     video_fs = os.path.abspath(video_final)
@@ -1042,19 +1168,15 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
         "-filter_complex", filter_complex,
         "-map", "[v]",
         "-map", "[a]",
-        "-c:v", "libx264",
-        "-preset", cfg["preset"],
-        "-crf", cfg["crf"],
+    ]
+    cmd.extend(_build_video_codec_args(cfg))
+    cmd.extend([
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-ar", "48000",
         "-movflags", "+faststart",
         salida
-    ]
-
-    if cfg.get("tune"):
-        cmd.insert(cmd.index("-pix_fmt"), "-tune")
-        cmd.insert(cmd.index("-pix_fmt"), cfg["tune"])
+    ])
 
     if cfg.get("audio_bitrate"):
         cmd.insert(cmd.index("-movflags"), "-b:a")
@@ -1068,6 +1190,7 @@ def append_intro_to_video(video_final, intro_path=DEFAULT_INTRO_PATH, output_pat
 
 
 def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
+    _ensure_gpu_precheck()
     if not os.path.exists(audio_path):
         raise FileNotFoundError(f"[CLIP] Audio no encontrado: {audio_path}")
     if not os.path.exists(image_path):
@@ -1095,9 +1218,9 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
         "-filter_complex", filter_complex,
         "-map", "[v0]",
         "-map", "1:a",
-        "-c:v", "libx264",
-        "-preset", cfg["preset"],
-        "-crf", cfg["crf"],
+    ]
+    cmd.extend(_build_video_codec_args(cfg))
+    cmd.extend([
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
         "-shortest",
@@ -1105,11 +1228,7 @@ def render_story_clip(audio_path, image_path, carpeta_salida, title_text=None):
         "-ar", "48000",
         "-movflags", "+faststart",
         _ffmpeg_path(salida_fs),
-    ]
-
-    if cfg.get("tune"):
-        cmd.insert(cmd.index("-pix_fmt"), "-tune")
-        cmd.insert(cmd.index("-pix_fmt"), cfg["tune"])
+    ])
 
     if cfg.get("audio_bitrate"):
         cmd.insert(cmd.index("-movflags"), "-b:a")
